@@ -2,11 +2,13 @@
 
 Deploy and provision a three-node Azure Local Small Form Factor cluster using nested Hyper-V on an Azure VM. This project automates the full lifecycle: infrastructure provisioning with **Terraform** or **Bicep**, OS installation via an automated setup script, and voucher retrieval from the provisioned nodes.
 
+For Microsoft's official product overview (ZTP, supported devices, and platform features), see [Overview of Small Form Factor Deployments of Azure Local (preview)](https://learn.microsoft.com/en-us/azure/azure-local/small-form-factor/small-form-factor-overview?view=azloc-2605).
+
 For a side-by-side comparison, parameter mapping, and Bicep commands, see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## Overview
 
-Azure Local SFF nodes require a zero-touch provisioning (ZTP) workflow. This repo creates a test environment that simulates a three-node SFF cluster by running nested VMs inside an Azure Hyper-V host. The nested VMs boot from the official Azure Local installer ISO and receive IP addresses via DHCP, just as physical SFF hardware would on a real network.
+Azure Local SFF nodes require a [zero-touch provisioning (ZTP)](https://learn.microsoft.com/en-us/azure/azure-local/small-form-factor/small-form-factor-overview?view=azloc-2605#features) workflow. This repo creates a test environment that simulates a three-node SFF cluster by running nested VMs inside an Azure Hyper-V host. The nested VMs boot from the official Azure Local installer ISO and receive IP addresses via DHCP, just as physical SFF hardware would on a real network.
 
 ### What gets deployed
 
