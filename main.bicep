@@ -56,7 +56,7 @@ param k3sBootstrapAgentsScriptFileName string = 'bootstrap-k3s-agents.sh'
 param k3sSetupInstructionsFileName string = 'K3S-CLUSTER-SETUP.txt'
 
 @description('URL for the Azure Local OS package or direct ISO URL (passed to setup.ps1).')
-param osImagePackageUrl string = 'https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/OS-Composition-Linux/10.2604.0.3096/roe-10.2604.0.3096.zip'
+param osImagePackageUrl string = 'https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/OS-Composition-Linux/10.2604.0.3100/roe-10.2604.0.3100.zip'
 
 @description('URL for the Azure Local Configurator app (passed to setup.ps1).')
 param configuratorAppUrl string = 'https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/ConfiguratorApp/10.3372.1.3007/V2/ConfiguratorAppV2-10.3372.1.3007.msix'
