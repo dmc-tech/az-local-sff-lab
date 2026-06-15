@@ -1,6 +1,6 @@
 # Azure Local Small Form Factor (SFF) Three-Node Cluster
 
-Deploy and provision a three-node Azure Local Small Form Factor cluster using nested Hyper-V on an Azure VM. This project automates the full lifecycle: infrastructure provisioning with **Terraform** or **Bicep**, OS installation via an automated setup script, and voucher retrieval from the provisioned nodes.
+Deploy and provision an Azure Local Small Form Factor cluster using nested Hyper-V on an Azure VM — **1 node** (single-node SFF) or **3 nodes** (cluster). This project automates the full lifecycle: infrastructure provisioning with **Terraform** or **Bicep**, OS installation via an automated setup script, and voucher retrieval from the provisioned nodes.
 
 For Microsoft's official product overview (ZTP, supported devices, and platform features), see [Overview of Small Form Factor Deployments of Azure Local (preview)](https://learn.microsoft.com/en-us/azure/azure-local/small-form-factor/small-form-factor-overview?view=azloc-2605).
 
@@ -8,7 +8,7 @@ For a side-by-side comparison, parameter mapping, and Bicep commands, see [`DEPL
 
 ## Overview
 
-Azure Local SFF nodes require a [zero-touch provisioning (ZTP)](https://learn.microsoft.com/en-us/azure/azure-local/small-form-factor/small-form-factor-overview?view=azloc-2605#features) workflow. This repo creates a test environment that simulates a three-node SFF cluster by running nested VMs inside an Azure Hyper-V host. The nested VMs boot from the official Azure Local installer ISO and receive IP addresses via DHCP, just as physical SFF hardware would on a real network.
+Azure Local SFF nodes require a [zero-touch provisioning (ZTP)](https://learn.microsoft.com/en-us/azure/azure-local/small-form-factor/small-form-factor-overview?view=azloc-2605#features) workflow. This repo creates a test environment that simulates an SFF deployment by running nested VMs inside an Azure Hyper-V host. Set **`nested_vm_count`** (Terraform) or **`nestedVmCount`** (Bicep) to **1** for a single-node lab or **3** for a three-node cluster (default). The nested VMs boot from the official Azure Local installer ISO and receive IP addresses via DHCP, just as physical SFF hardware would on a real network.
 
 ### What gets deployed
 
@@ -28,7 +28,7 @@ Azure Local SFF nodes require a [zero-touch provisioning (ZTP)](https://learn.mi
 3. **Downloads the OS image package** — fetches the Azure Local ZIP package (Terraform: `os_image_package_url`; Bicep: `osImagePackageUrl`), extracts `provision-os.iso`, and stages it for VM boot; the Configurator app URL is set the same way (`configurator_app_url` / `configuratorAppUrl`). See [Where to set the OS image package and Configurator app URLs](DEPLOYMENT.md#where-to-set-the-os-image-package-and-configurator-app-urls) in `DEPLOYMENT.md`.
 4. **Configures NAT networking** — creates an internal Hyper-V switch (`NATSwitch`) with a `192.168.100.0/24` subnet and NAT for outbound connectivity
 5. **Installs and configures DHCP** — sets up a DHCP scope (`192.168.100.100–200`) so the nested VMs receive IP addresses automatically
-6. **Creates three nested VMs** (`NestedVM-01` through `NestedVM-03`) — each with 8 vCPUs, 16 GB RAM, 500 GB dynamic VHDX, Generation 2, vTPM enabled, and MAC address spoofing on
+6. **Creates nested VMs** (`NestedVM-01` through `NestedVM-03` when count is 3, or `NestedVM-01` only when count is 1) — each with 8 vCPUs, 16 GB RAM, 500 GB dynamic VHDX, Generation 2, vTPM enabled, and MAC address spoofing on
 7. **Attaches the ISO and boots** — mounts the installer ISO on each VM with DVD-first boot order and starts them
 
 **Get-SffNodeVoucher.ps1** retrieves FDO voucher files from the provisioned nodes:
@@ -96,6 +96,7 @@ See `bootstrap/README.md` for full details.
 ```bash
 copy terraform.tfvars.example terraform.tfvars
 # Edit terraform.tfvars — set admin_password (12+ chars, Azure complexity required)
+# Optional: nested_vm_count = 1 for single-node SFF, or 3 (default) for a three-node cluster
 # Optional: set os_image_package_url and configurator_app_url to target specific Azure Local builds (see DEPLOYMENT.md)
 ```
 
@@ -233,7 +234,8 @@ NTANetAnalytics
 
 | Setting | Value |
 |---|---|
-| Count | 3 (`NestedVM-01` to `NestedVM-03`) |
+| Count | **1** or **3** (`nested_vm_count` / `nestedVmCount`; default 3) |
+| Names | `NestedVM-01` (and `-02`, `-03` when count is 3) |
 | Generation | 2 |
 | vCPUs | 8 per VM |
 | RAM | 16 GB static per VM |
@@ -246,7 +248,7 @@ NTANetAnalytics
 
 | Script | Location on host | Purpose |
 |---|---|---|
-| `setup.ps1` | `C:\Scripts\setup.ps1` | Configures the Hyper-V host and provisions the three nested VMs |
+| `setup.ps1` | `C:\Scripts\setup.ps1` | Configures the Hyper-V host and provisions nested VMs (count from `nested_vm_count` / `nestedVmCount`) |
 | `Get-SffNodeVoucher.ps1` | `C:\Scripts\Get-SffNodeVoucher.ps1` | Retrieves FDO voucher PEM files from the provisioned nodes via SSH |
 | `setup_k3s_arc.sh` | `C:\Scripts\setup_k3s_arc.sh` | K3s server + Azure Arc on the management node (after all nodes are Arc-enabled) |
 | `k3s-join-agent.sh` | `C:\Scripts\k3s-join-agent.sh` | Installs K3s agent on a worker with `INSTALL_K3S_SKIP_SELINUX_RPM=true` |

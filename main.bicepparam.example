@@ -9,6 +9,7 @@ param adminPassword = 'CHANGE_ME'
 // Optional overrides (uncomment as needed):
 // param location = 'uksouth'
 // param vmName = 'vm-hv-host-1'
+// param nestedVmCount = 3   // 1 = single-node SFF lab; 3 = three-node cluster
 // Azure Local OS package (ZIP with provision-os.iso) and Configurator app — defaults are in main.bicep if you omit these:
 // param osImagePackageUrl = 'https://azurestackreleases.download.prss.microsoft.com/.../roe-....zip'
 // param configuratorAppUrl = 'https://azurestackreleases.download.prss.microsoft.com/.../ConfiguratorAppV2-....msix'

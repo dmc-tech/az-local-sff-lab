@@ -13,6 +13,8 @@ param(
     [Parameter(Mandatory = $true)][string]$OsImagePackageUrl,
     [Parameter(Mandatory = $true)][string]$ConfiguratorAppUrl,
     [Parameter(Mandatory = $true)][string]$NestedVmPrefix,
+    [ValidateSet(1, 3)]
+    [int]$NestedVmCount = 3,
     [Parameter(Mandatory = $true)][string]$AdminUsername,
     [Parameter(Mandatory = $true)][string]$AdminPassword
 )
@@ -91,7 +93,7 @@ New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\SQMClient\Windows' -Na
 New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting' -Force -ErrorAction SilentlyContinue | Out-Null
 New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting' -Name 'Disabled' -Value 1 -PropertyType DWord -Force
 
-$runOnceValue = "powershell.exe -NoExit -ExecutionPolicy Bypass -File C:\Scripts\$SetupScriptFileName -OsImagePackageUrl '$OsImagePackageUrl' -ConfiguratorAppUrl '$ConfiguratorAppUrl' -VMPrefix '$NestedVmPrefix'"
+$runOnceValue = "powershell.exe -NoExit -ExecutionPolicy Bypass -File C:\Scripts\$SetupScriptFileName -OsImagePackageUrl '$OsImagePackageUrl' -ConfiguratorAppUrl '$ConfiguratorAppUrl' -VMPrefix '$NestedVmPrefix' -VMCount $NestedVmCount"
 Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'RunSetupScript' -Value $runOnceValue
 
 $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'

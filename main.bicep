@@ -23,6 +23,10 @@ param vmName string = 'vm-hv-host-1'
 @description('Prefix used for nested Hyper-V VMs created by setup.ps1.')
 param nestedVmPrefix string = 'NestedVM'
 
+@description('Number of nested Hyper-V VMs to create on the host.')
+@allowed([1, 3])
+param nestedVmCount int = 3
+
 @description('Size of the attached data disk in GB.')
 param dataDiskSizeGb int = 1024
 
@@ -449,7 +453,9 @@ var commandToExecute = join([
   configuratorAppUrl
   '\u{22} -NestedVmPrefix \u{22}'
   nestedVmPrefix
-  '\u{22} -AdminUsername \u{22}'
+  '\u{22} -NestedVmCount '
+  string(nestedVmCount)
+  ' -AdminUsername \u{22}'
   adminUsername
   '\u{22} -AdminPassword \u{22}'
   adminPassword

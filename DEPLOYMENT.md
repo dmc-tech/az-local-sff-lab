@@ -16,6 +16,7 @@ This repository provisions a Windows Server Hyper-V lab host in Azure (virtual n
 | Admin user / password | `admin_username`, `admin_password` | `adminUsername`, `adminPassword` |
 | VM name | `vm_name` (≤ 15 characters) | `vmName` |
 | Nested VM prefix | `nested_vm_prefix` | `nestedVmPrefix` |
+| Nested VM count (1 or 3) | `nested_vm_count` | `nestedVmCount` |
 | Data disk size (GB) | `data_disk_size_gb` | `dataDiskSizeGb` |
 | OS / Configurator URLs | `os_image_package_url`, `configurator_app_url` | `osImagePackageUrl`, `configuratorAppUrl` |
 | Flow logs | `enable_nsg_flow_logs`, `enable_traffic_analytics`, retention vars | `enableNsgFlowLogs`, `enableTrafficAnalytics`, `nsgFlowLogsRetentionDays`, `logAnalyticsRetentionDays` |

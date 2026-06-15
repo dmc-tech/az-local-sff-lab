@@ -6,21 +6,23 @@
 # Creates:
 #   - An internal Hyper-V switch with NAT for internet access
 #   - Downloads the OS image package and extracts provision-os.iso
-#   - 3 nested VMs (8 vCPUs, 16 GB RAM each) using the downloaded image
+#   - 1 or 3 nested VMs (8 vCPUs, 16 GB RAM each) using the downloaded image
 # ---------------------------------------------------------------------------
 
 #Requires -RunAsAdministrator
 
 param(
-    [string]$OsImagePackageUrl = "https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/OS-Composition-Linux/10.2602.20.3005/roe-10.2602.20.3005.zip",
+    [string]$OsImagePackageUrl = "https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/OS-Composition-Linux/10.2604.0.3096/roe-10.2604.0.3096.zip",
     [string]$DotNetWindowsDesktopRuntimeUrl = "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/9.0.14/windowsdesktop-runtime-9.0.14-win-x64.exe",
     # Direct download URL (.msix / .appx / .exe). Install path is inferred from ZIP (MSIX) vs MZ (EXE) headers if URL suffix mismatches payload.
-    [string]$ConfiguratorAppUrl = "https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/ConfiguratorApp/10.2604.0.3052/V2/ConfiguratorAppV2-10.2604.0.3052.msix",
-    [string]$VMPrefix = "NestedVM"
+    [string]$ConfiguratorAppUrl = "https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/ConfiguratorApp/10.3372.1.3007/V2/ConfiguratorAppV2-10.3372.1.3007.msix",
+    [string]$VMPrefix = "NestedVM",
+    [ValidateSet(1, 3)]
+    [int]$VMCount = 3
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.1.7"
+$ScriptVersion = "1.2.0"
 $LogFile       = "C:\Scripts\setup.log"
 $CompletedFlag = "C:\Scripts\.setup-completed"
 $VHDRoot       = "F:\Hyper-V\Virtual Hard Disks"  # Data disk (formatted separately)
@@ -48,7 +50,6 @@ $DotNetWindowsDesktopRuntimeUrl = Normalize-StringParam $DotNetWindowsDesktopRun
 $ConfiguratorAppUrl = Normalize-StringParam $ConfiguratorAppUrl
 $VMPrefix = Normalize-StringParam $VMPrefix
 
-$VMCount  = 3
 $VMMemory = 16GB
 $VMCPUs   = 8
 
@@ -64,7 +65,8 @@ if ([string]::IsNullOrWhiteSpace($configuratorLeaf)) {
 }
 # Use Path::Combine, not Join-Path: Join-Path resolves F: and fails before Initialize-DataDisk creates the volume.
 $ConfiguratorInstallerPath = [System.IO.Path]::Combine($OSImageDir, $configuratorLeaf)
-$PuttyInstallerUrl = "https://the.earth.li/~sgtatham/putty/latest/w64/putty-64bit-0.83-installer.msi"
+# Version-less filename follows /latest/ redirects to the current PuTTY release.
+$PuttyInstallerUrl = "https://the.earth.li/~sgtatham/putty/latest/w64/putty-64bit-installer.msi"
 $PuttyInstallerPath = "$OSImageDir\putty-64bit-installer.msi"
 $VHDSize     = 500GB   # Thin-provisioned (dynamic) VHDX per VM
 $DownloadTimeoutSeconds = 1800
@@ -398,9 +400,74 @@ function Resolve-ConfiguratorInstallKind {
 }
 
 # ---------------------------------------------------------------------------
+# Configurator version helpers (skip reinstall when equal/newer MSIX is present)
+# ---------------------------------------------------------------------------
+function Get-ConfiguratorTargetVersion {
+    param([string]$Url)
+
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        return $null
+    }
+
+    if ($Url -match '(\d+\.\d+\.\d+\.\d+)') {
+        return [Version]$Matches[1]
+    }
+
+    return $null
+}
+
+function Get-InstalledConfiguratorAppxVersion {
+    $packages = @(Get-AppxPackage -Name '*configurator*' -ErrorAction SilentlyContinue)
+    if ($packages.Count -eq 0) {
+        return $null
+    }
+
+    $maxVersion = $null
+    foreach ($pkg in $packages) {
+        $version = [Version]$pkg.Version
+        if ($null -eq $maxVersion -or $version -gt $maxVersion) {
+            $maxVersion = $version
+        }
+    }
+
+    return $maxVersion
+}
+
+function Test-ConfiguratorSatisfied {
+    param([string]$Url)
+
+    $targetVersion = Get-ConfiguratorTargetVersion -Url $Url
+    $installedVersion = Get-InstalledConfiguratorAppxVersion
+
+    if ($null -ne $installedVersion -and ($null -eq $targetVersion -or $installedVersion -ge $targetVersion)) {
+        return @{
+            Satisfied = $true
+            Installed = $installedVersion
+            Target    = $targetVersion
+        }
+    }
+
+    return @{
+        Satisfied = $false
+        Installed = $installedVersion
+        Target    = $targetVersion
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Download and install Azure Local Configurator app on host
 # ---------------------------------------------------------------------------
 function Install-ConfiguratorApp {
+    $satisfied = Test-ConfiguratorSatisfied -Url $ConfiguratorAppUrl
+    if ($satisfied.Satisfied) {
+        if ($null -eq $satisfied.Target) {
+            Write-Log "Configurator app already installed (version $($satisfied.Installed)); could not parse target version from URL - skipping install"
+        } else {
+            Write-Log "Configurator app already installed (version $($satisfied.Installed)); target package is $($satisfied.Target) - skipping download and install"
+        }
+        return
+    }
+
     $pathExt = [System.IO.Path]::GetExtension($ConfiguratorInstallerPath).ToLowerInvariant()
     if ($pathExt -and $pathExt -notin ".exe", ".msix", ".appx") {
         Write-Log "Configurator download path uses extension '$pathExt' (non-standard); install method will be chosen from file contents (EXE vs MSIX)"
@@ -467,7 +534,16 @@ function Install-ConfiguratorApp {
             throw "Configurator EXE installer failed with exit code $($process.ExitCode). If the vendor uses different silent switches, adjust Install-ConfiguratorApp in setup.ps1."
         }
     } elseif ($installKind -eq 'Msix') {
-        Add-AppxPackage -Path $ConfiguratorInstallerPath
+        try {
+            Add-AppxPackage -Path $ConfiguratorInstallerPath
+        } catch {
+            if ($_.Exception.Message -match '0x80073D06|higher version of this package is already installed') {
+                $installedVersion = Get-InstalledConfiguratorAppxVersion
+                Write-Log "Configurator package not installed because version $installedVersion is already present (equal or newer than target); continuing"
+            } else {
+                throw
+            }
+        }
     } else {
         throw "Unsupported Configurator install kind '$installKind'"
     }
@@ -870,6 +946,7 @@ try {
 
     Write-Log "========== setup.ps1 started =========="
     Write-Log "Script version: $ScriptVersion"
+    Write-Log "Nested VM count: $VMCount"
 
     Write-Log "--- Initialising data disk ---"
     Initialize-DataDisk

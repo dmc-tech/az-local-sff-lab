@@ -45,6 +45,17 @@ variable "nested_vm_prefix" {
   default     = "NestedVM"
 }
 
+variable "nested_vm_count" {
+  description = "Number of nested Hyper-V VMs to create on the host. Valid values: 1 or 3."
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = contains([1, 3], var.nested_vm_count)
+    error_message = "nested_vm_count must be 1 or 3."
+  }
+}
+
 variable "data_disk_size_gb" {
   description = "Size of the attached data disk in GB"
   type        = number
