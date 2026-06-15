@@ -1,0 +1,173 @@
+================================================================================
+  K3s three-node cluster setup (Azure Local SFF lab)
+================================================================================
+
+Scripts on this Hyper-V host (after provisioning): C:\Scripts\
+
+  setup_k3s_arc.sh          - K3s server + Azure Arc connect (management node only)
+  k3s-join-agent.sh         - Join one worker to the cluster
+  bootstrap-k3s-agents.sh   - From management node, join both workers over SSH
+  vm-bootstrap.ps1          - Host bootstrap (Custom Script Extension)
+  Get-SffNodeVoucher.ps1    - FDO vouchers during initial install (edgeuser; pre-Arc)
+  K3S-CLUSTER-SETUP.txt     - This file
+
+Nested VMs: NestedVM-01 (management), NestedVM-02 and NestedVM-03 (workers).
+Network: 192.168.100.0/24 (DHCP 192.168.100.100-200).
+
+--------------------------------------------------------------------------------
+  PREREQUISITES (all three nodes — do not skip)
+--------------------------------------------------------------------------------
+
+Complete these steps for EVERY nested VM (NestedVM-01, -02, and -03) before you
+run any K3s script in this guide:
+
+  1. Azure Local provisioning finished on the node (installer / portal workflow).
+  2. The node is registered and Arc-enabled in Azure (Azure Local + Arc as you
+     deployed the cluster in the Azure portal).
+
+Only after a node is provisioned and Arc-enabled should you use it for K3s.
+
+SSH after provisioning (not during ISO / FDO install):
+
+  User:     clouduser
+  Auth:     SSH private key generated at provisioning time
+
+That private key is created when the machine is provisioned. It is downloaded to
+the Downloads folder on the PC where you ran the Azure portal browser session
+(the admin workstation that completed provisioning in the portal). Copy that key
+to this Hyper-V host (and later to the management node) before using scp/ssh.
+
+Example (from your admin PC, after downloading the key from the portal):
+
+  - Locate the key in Downloads (filename varies; often a .pem from provisioning).
+  - Copy it to this host, e.g. C:\Scripts\keys\NestedVM-01.pem
+
+Do not use edgeuser or Get-SffNodeVoucher.ps1 for K3s steps; those apply to the
+earlier install/voucher phase only.
+
+--------------------------------------------------------------------------------
+  BEFORE K3S — on this Hyper-V host
+--------------------------------------------------------------------------------
+
+1. setup.ps1 completed (C:\Scripts\setup.log, C:\Scripts\.setup-completed).
+2. All three nested VMs provisioned and Arc-enabled in Azure.
+3. You have the provisioning SSH private key(s) from the portal Downloads folder
+   on this host (or on the admin PC and copied here).
+4. SSH to each node as clouduser works, for example:
+
+     ssh -i C:\Scripts\keys\NestedVM-01.pem clouduser@<MGMT_IP>
+
+   Find IPs via DHCP on this host or the Azure portal / cluster view.
+5. Assign roles:
+     <MGMT_IP>    = NestedVM-01 (K3s server + Arc connect script)
+     <WORKER1_IP> = NestedVM-02
+     <WORKER2_IP> = NestedVM-03
+
+--------------------------------------------------------------------------------
+  STEP 1 - Install K3s server on the management nested VM
+--------------------------------------------------------------------------------
+
+From this Hyper-V host (PowerShell). Install OpenSSH Client if scp is missing.
+
+  scp -i C:\Scripts\keys\NestedVM-01.pem C:\Scripts\setup_k3s_arc.sh clouduser@<MGMT_IP>:~/setup_k3s_arc.sh
+
+On the management Linux VM:
+
+  chmod +x ~/setup_k3s_arc.sh
+  sudo ./setup_k3s_arc.sh
+
+Optional environment (before sudo):
+
+  RESOURCE_GROUP=arc-k3s-rg
+  CLUSTER_NAME=arc-k3s-cluster
+  LOCATION=eastus
+
+The installer uses INSTALL_K3S_SKIP_SELINUX_RPM=true (required on Azure Local nodes).
+
+Verify on the management VM:
+
+  sudo kubectl get nodes
+
+--------------------------------------------------------------------------------
+  STEP 2 - Provisioning SSH key on the management VM (for joining workers)
+--------------------------------------------------------------------------------
+
+bootstrap-k3s-agents.sh SSHes as clouduser to the two workers. Use the same
+provisioning private key(s) trusted on those nodes (from portal Downloads).
+
+From this Hyper-V host (use the key file you copied from the admin Downloads
+folder; one key may cover all nodes if your deployment used a shared pattern):
+
+  scp -i C:\Scripts\keys\NestedVM-01.pem C:\Scripts\keys\provisioned-key.pem clouduser@<MGMT_IP>:~/.ssh/provisioned_key
+  ssh -i C:\Scripts\keys\NestedVM-01.pem clouduser@<MGMT_IP> "chmod 600 ~/.ssh/provisioned_key"
+
+Workers must allow passwordless sudo for clouduser when the join script runs.
+
+--------------------------------------------------------------------------------
+  STEP 3 - Copy join scripts to the management VM
+--------------------------------------------------------------------------------
+
+From this Hyper-V host:
+
+  ssh -i C:\Scripts\keys\NestedVM-01.pem clouduser@<MGMT_IP> "mkdir -p ~/k3s"
+  scp -i C:\Scripts\keys\NestedVM-01.pem C:\Scripts\bootstrap-k3s-agents.sh clouduser@<MGMT_IP>:~/k3s/
+  scp -i C:\Scripts\keys\NestedVM-01.pem C:\Scripts\k3s-join-agent.sh clouduser@<MGMT_IP>:~/k3s/
+
+On the management VM:
+
+  chmod +x ~/k3s/bootstrap-k3s-agents.sh ~/k3s/k3s-join-agent.sh
+
+--------------------------------------------------------------------------------
+  STEP 4 - Join both workers (recommended)
+--------------------------------------------------------------------------------
+
+On the management VM (replace IPs with your worker addresses):
+
+  cd ~/k3s
+  export K3S_WORKER_IPS="<WORKER1_IP> <WORKER2_IP>"
+  export SSH_USER=clouduser
+  export SSH_IDENTITY=$HOME/.ssh/provisioned_key
+  export SSH_OPTS="-o StrictHostKeyChecking=accept-new"
+  sudo -E ./bootstrap-k3s-agents.sh
+
+Verify on the management VM:
+
+  sudo kubectl get nodes -o wide
+
+--------------------------------------------------------------------------------
+  STEP 4 (alternate) - Join one worker manually
+--------------------------------------------------------------------------------
+
+On the management VM:
+
+  sudo cat /var/lib/rancher/k3s/server/node-token
+
+On the worker VM (as clouduser, with provisioning key):
+
+  export K3S_URL="https://<MGMT_IP>:6443"
+  export K3S_TOKEN="<paste token>"
+  sudo -E bash ~/k3s-join-agent.sh
+
+Or scp C:\Scripts\k3s-join-agent.sh to the worker first.
+
+--------------------------------------------------------------------------------
+  TROUBLESHOOTING
+--------------------------------------------------------------------------------
+
+- C:\Scripts missing files: re-run terraform apply so Custom Script Extension
+  refreshes copies; check C:\WindowsAzure\Logs\Plugins\
+  Microsoft.Compute.CustomScriptExtension\
+
+- setup_k3s_arc.sh must stay that name on this host (not setup_k3s_arch.sh).
+
+- SSH "permission denied": confirm node is provisioned and Arc-enabled; use
+  clouduser and the portal-downloaded private key, not edgeuser.
+
+- Join fails: workers must be Arc-enabled and reachable on 6443 to <MGMT_IP>;
+  workers need outbound HTTPS to get.k3s.io; clouduser needs passwordless sudo.
+
+- Arc / RBAC on the cluster: see setup_k3s_arc.sh on the management node.
+
+================================================================================
+  End of instructions
+================================================================================

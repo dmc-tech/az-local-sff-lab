@@ -1,0 +1,21 @@
+# Copy to terraform.tfvars and set your values (do not commit terraform.tfvars)
+
+resource_group_name = "rg-glove-rock-demo-1-uks"
+location            = "UK South"
+environment         = "dev"
+
+admin_username = "azureadmin"
+# Set a strong password (12+ chars, complexity required by Azure for Windows)
+admin_password = "##YourSecurePassword123##"
+
+vm_name           = "vm-azlsff-host1"   # 15 characters max (Windows computer name limit)
+nested_vm_prefix  = "NestedVM"
+data_disk_size_gb = 1024 # 1 TB
+# Azure Local: OS package (ZIP with provision-os.iso) and Configurator app — override defaults from variables.tf here
+os_image_package_url = "https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/OS-Composition-Linux/10.2604.0.3096/roe-10.2604.0.3096.zip"
+configurator_app_url = "https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/ConfiguratorApp/10.3372.1.3007/V2/ConfiguratorAppV2-10.3372.1.3007.msix"
+
+tags = {
+  ManagedBy = "Terraform"
+  Project   = "Azure Local SFF Lab"
+}

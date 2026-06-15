@@ -1,0 +1,261 @@
+# Azure Local Small Form Factor (SFF) Three-Node Cluster
+
+Deploy and provision a three-node Azure Local Small Form Factor cluster using nested Hyper-V on an Azure VM. This project automates the full lifecycle: infrastructure provisioning with **Terraform** or **Bicep**, OS installation via an automated setup script, and voucher retrieval from the provisioned nodes.
+
+For a side-by-side comparison, parameter mapping, and Bicep commands, see [`DEPLOYMENT.md`](DEPLOYMENT.md).
+
+## Overview
+
+Azure Local SFF nodes require a zero-touch provisioning (ZTP) workflow. This repo creates a test environment that simulates a three-node SFF cluster by running nested VMs inside an Azure Hyper-V host. The nested VMs boot from the official Azure Local installer ISO and receive IP addresses via DHCP, just as physical SFF hardware would on a real network.
+
+### What gets deployed
+
+**Terraform** or **Bicep** provisions the Azure infrastructure (same overall design; pick one tool):
+
+- A Windows Server 2025 VM (`Standard_E32s_v5` — 32 vCPUs, 256 GB RAM) with nested virtualization support
+- 1 TB premium data disk for VM storage
+- Virtual network with NAT gateway for outbound internet
+- Azure Bastion for secure RDP access (no public IP on the VM)
+- Auto-shutdown schedule (19:00 GMT daily)
+- A storage account to deliver provisioning scripts to the host
+
+**setup.ps1** runs automatically on first boot and configures the Hyper-V host:
+
+1. **Initialises the data disk** — brings the raw 1 TB disk online, partitions it as GPT, and formats it as NTFS on `F:\`
+2. **Creates directories** — sets up `F:\Hyper-V` for VM files, VHDs, and ISO images
+3. **Downloads the OS image package** — fetches the Azure Local ZIP package (Terraform: `os_image_package_url`; Bicep: `osImagePackageUrl`), extracts `provision-os.iso`, and stages it for VM boot; the Configurator app URL is set the same way (`configurator_app_url` / `configuratorAppUrl`). See [Where to set the OS image package and Configurator app URLs](DEPLOYMENT.md#where-to-set-the-os-image-package-and-configurator-app-urls) in `DEPLOYMENT.md`.
+4. **Configures NAT networking** — creates an internal Hyper-V switch (`NATSwitch`) with a `192.168.100.0/24` subnet and NAT for outbound connectivity
+5. **Installs and configures DHCP** — sets up a DHCP scope (`192.168.100.100–200`) so the nested VMs receive IP addresses automatically
+6. **Creates three nested VMs** (`NestedVM-01` through `NestedVM-03`) — each with 8 vCPUs, 16 GB RAM, 500 GB dynamic VHDX, Generation 2, vTPM enabled, and MAC address spoofing on
+7. **Attaches the ISO and boots** — mounts the installer ISO on each VM with DVD-first boot order and starts them
+
+**Get-SffNodeVoucher.ps1** retrieves FDO voucher files from the provisioned nodes:
+
+- Auto-discovers VM IPs from the DHCP scope (or accepts explicit IPs)
+- Connects to each node via SSH and locates PEM voucher files
+- Downloads vouchers to `C:\vouchers\<ip>\` on the host
+
+## Deployment methods
+
+| Approach | Summary |
+|---|---|
+| **Terraform** | Remote state-friendly; uses `*.tfvars` / `TF_VAR_*` and the workflow below. |
+| **Bicep** | Native Azure IaC; deploy with `az deployment group create` and `main.bicep`. Full steps and parameter equivalences are in [`DEPLOYMENT.md`](DEPLOYMENT.md). |
+
+The host behaviour after deploy (Custom Script Extension, `setup.ps1`, nested VMs, Bastion access) is the same for either path.
+
+### Azure Local download URLs (OS package and Configurator)
+
+To pin different **Azure Local** builds (OS composition ZIP / ISO source and **Configurator** app), set the variables before you deploy:
+
+- **Terraform:** Your **`terraform.tfvars`** (copy from [`terraform.tfvars.example`](terraform.tfvars.example)) — `os_image_package_url`, `configurator_app_url`. Repository defaults are in [`variables.tf`](variables.tf) if you omit them from `*.tfvars`.
+- **Bicep:** your parameter file from [`main.bicepparam.example`](main.bicepparam.example) — `osImagePackageUrl`, `configuratorAppUrl`, or the default `param` values at the top of [`main.bicep`](main.bicep).
+
+Details and CLI override examples: [DEPLOYMENT.md — Where to set the OS image package and Configurator app URLs](DEPLOYMENT.md#where-to-set-the-os-image-package-and-configurator-app-urls).
+
+## Prerequisites
+
+- Azure CLI logged in (`az login`) with a subscription selected
+- **Terraform path:** [Terraform](https://www.terraform.io/downloads) >= 1.0 (see `versions.tf`)
+- **Bicep path:** [Bicep CLI](https://learn.microsoft.com/azure/azure-resource-manager/bicep/install) (`az bicep install`), used via `az deployment` commands ([`DEPLOYMENT.md`](DEPLOYMENT.md))
+- Sufficient quota in the target region for `Standard_E32s_v5` and Azure Bastion
+
+You only need the toolchain for the method you choose (Terraform alone, or Bicep alone, unless you maintain both).
+
+## Remote State (recommended for Terraform)
+
+State is stored in Azure Storage so it can be shared and protected. **Bicep deployments do not use this bootstrap**; they rely on Azure Resource Manager as the source of truth.
+
+1. **Bootstrap** (once) — create the storage account and container:
+
+```bash
+cd bootstrap
+copy terraform.tfvars.example terraform.tfvars
+terraform init && terraform apply
+cd ..
+```
+
+1. **Backend config** — copy `backend.hcl.example` to `backend.hcl` and fill in `resource_group_name`, `storage_account_name`, `container_name` from the bootstrap outputs, plus your chosen state file `key`.
+
+2. **Initialise** the backend:
+
+```bash
+terraform init -reconfigure -backend-config=backend.hcl
+```
+
+See `bootstrap/README.md` for full details.
+
+## Usage
+
+### Terraform
+
+1. **Configure variables:**
+
+```bash
+copy terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars — set admin_password (12+ chars, Azure complexity required)
+# Optional: set os_image_package_url and configurator_app_url to target specific Azure Local builds (see DEPLOYMENT.md)
+```
+
+2. **Deploy:**
+
+```bash
+terraform init -reconfigure -backend-config=backend.hcl   # or just: terraform init
+terraform plan
+terraform apply
+```
+
+3. **Wait for provisioning.** Terraform installs the Hyper-V and DHCP roles, copies the scripts to `C:\Scripts\`, and reboots. On first logon (auto-logon is configured), `setup.ps1` runs automatically — it downloads the ISO, creates the VMs, and boots them from it.
+
+4. **Connect via Azure Bastion.** In the Azure Portal: VM > Connect > Bastion. Sign in with the admin credentials from `terraform.tfvars`.
+
+### Bicep
+
+Deploy from the repository root after creating a resource group. Copy [`main.bicepparam.example`](main.bicepparam.example) to a parameter file you do not commit, set `adminPassword` and other parameters (`osImagePackageUrl` / `configuratorAppUrl` if you want to override the defaults in [`main.bicep`](main.bicep)), then run `az deployment group create` as documented in [`DEPLOYMENT.md`](DEPLOYMENT.md) (including optional password-from-shell examples). Outputs such as `vmPrivateIp` and `scriptsStorageAccountName` are available from the deployment. Connect via Bastion using the admin credentials you supplied to the deployment.
+
+## After deployment (both methods)
+
+1. **Retrieve vouchers.** The voucher script can poll automatically — start it right after `setup.ps1` finishes and it will wait for each node to produce its FDO PEM file:
+
+```powershell
+# Automated polling (checks every 60s, up to 2 hours, using SSH key auth)
+C:\Scripts\Get-SffNodeVoucher.ps1 -Wait -SshKeyPath C:\Users\azureadmin\.ssh\id_rsa
+```
+
+Or customise the interval and timeout:
+
+```powershell
+C:\Scripts\Get-SffNodeVoucher.ps1 -Wait -SshKeyPath C:\Users\azureadmin\.ssh\id_rsa -PollIntervalSeconds 30 -TimeoutMinutes 90
+```
+
+One-shot mode is also available (will prompt for SSH passwords):
+
+```powershell
+C:\Scripts\Get-SffNodeVoucher.ps1
+C:\Scripts\Get-SffNodeVoucher.ps1 -RemoteHosts @("192.168.100.100", "192.168.100.101", "192.168.100.102")
+```
+
+For unattended polling, set up SSH key-based auth first:
+
+```powershell
+ssh-keygen -t rsa -N '""' -f C:\Users\azureadmin\.ssh\id_rsa
+# Then distribute the public key to each node once SSH is available
+```
+
+2. **K3s cluster.** On the Hyper-V host, open **`C:\Scripts\K3S-CLUSTER-SETUP.txt`** (Notepad). All three nested VMs must be **provisioned and Arc-enabled** first; SSH then uses **`clouduser`** and the private key downloaded from the Azure portal provisioning flow. Scripts include `setup_k3s_arc.sh`, `k3s-join-agent.sh`, and `bootstrap-k3s-agents.sh`.
+
+   If `C:\Scripts` is missing files after you changed the repo, run **`terraform apply`** again so the Custom Script Extension re-runs (the extension timestamp changes when script content changes). Check extension status under the VM → **Extensions** in the Azure portal, or logs under `C:\WindowsAzure\Logs\Plugins\Microsoft.Compute.CustomScriptExtension\`.
+
+## Azure Resources Created
+
+The following table matches the **Terraform** variable names; Bicep uses the parameters listed in [`DEPLOYMENT.md`](DEPLOYMENT.md) (for example `vmName`, `adminUsername`).
+
+| Resource | Details |
+|---|---|
+| Resource group | Per `resource_group_name` variable (Terraform) or the group you pass to `az deployment` (Bicep) |
+| Virtual network | `10.0.0.0/16` |
+| VM subnet | `10.0.1.0/24` with NAT gateway |
+| Bastion subnet | `10.0.2.0/26` (`AzureBastionSubnet`) |
+| NAT gateway | Standard SKU for outbound internet |
+| Azure Bastion | Secure RDP access to the host |
+| Windows Server VM | `Standard_E32s_v5`, Windows Server 2025 Datacenter |
+| Data disk | 1 TB Premium LRS, attached as LUN 0 |
+| Storage account | Holds provisioning scripts (`setup.ps1`, `Get-SffNodeVoucher.ps1`, `vm-bootstrap.ps1`, `setup_k3s_arc.sh`, `k3s-join-agent.sh`, `bootstrap-k3s-agents.sh`, `K3S-CLUSTER-SETUP.txt`) |
+
+## Optional: Virtual Network flow logs (Traffic Analytics) for Arc troubleshooting
+
+If you set `enable_nsg_flow_logs = true` (Terraform) or `enableNsgFlowLogs = true` (Bicep), the template will deploy:
+
+- An NSG on the Hyper-V host NIC (recommended for security; flow logs are collected at the VNet level)
+- Network Watcher
+- A storage account for virtual network flow logs
+- (Optional) a Log Analytics workspace and Traffic Analytics (`enable_traffic_analytics` / `enableTrafficAnalytics`)
+
+> Note: the nested Hyper-V VMs egress through the host (WinNAT). In Azure flow logs and Traffic Analytics, traffic will appear as coming from the **host VM private IP**, not from the nested `192.168.100.x` addresses.
+
+### Ready-to-paste KQL (Log Analytics)
+
+Run these in the Log Analytics workspace created when Traffic Analytics is enabled (`enable_traffic_analytics` / `enableTrafficAnalytics`).
+
+Traffic Analytics for **Virtual Network flow logs** writes primarily to the `NTANetAnalytics` table.
+
+**1) Show outbound denies from the Hyper-V host on TCP 443 (last 6 hours)**
+
+Replace `<HOST_PRIVATE_IP>` with the Terraform output `vm_private_ip` or the Bicep output `vmPrivateIp` (e.g. `10.0.1.4`).
+
+```kusto
+NTANetAnalytics
+| where SubType == "FlowLog"
+| where TimeGenerated > ago(6h)
+| where SrcIp == "<HOST_PRIVATE_IP>"
+| where DestPort == 443
+| summarize DeniedOutFlows = sum(DeniedOutFlows) by DestIp, L4Protocol, DestPort
+| order by DeniedOutFlows desc
+```
+
+**2) Summarize top outbound destinations/ports from the host during registration attempts (last 2 hours)**
+
+```kusto
+NTANetAnalytics
+| where SubType == "FlowLog"
+| where TimeGenerated > ago(2h)
+| where SrcIp == "<HOST_PRIVATE_IP>"
+| summarize
+    AllowedOutFlows = sum(AllowedOutFlows),
+    DeniedOutFlows  = sum(DeniedOutFlows),
+    BytesSrcToDest  = sum(BytesSrcToDest)
+  by DestIp, DestPort, L4Protocol
+| order by DeniedOutFlows desc, AllowedOutFlows desc
+```
+
+**3) Spot suspicious spikes on TCP 443 (possible egress/SNAT stress symptom)**
+
+This buckets TCP 443 flows into 5-minute windows and highlights time periods with lots of denies relative to total flows.
+
+```kusto
+NTANetAnalytics
+| where SubType == "FlowLog"
+| where TimeGenerated > ago(2h)
+| where SrcIp == "<HOST_PRIVATE_IP>"
+| where DestPort == 443
+| summarize
+    Allowed = sum(AllowedOutFlows),
+    Denied  = sum(DeniedOutFlows)
+  by bin(TimeGenerated, 5m)
+| extend Total = Allowed + Denied
+| extend DenyRate = todouble(Denied) / iif(Total == 0, 1, Total)
+| order by TimeGenerated asc
+```
+
+## Nested VM Configuration
+
+| Setting | Value |
+|---|---|
+| Count | 3 (`NestedVM-01` to `NestedVM-03`) |
+| Generation | 2 |
+| vCPUs | 8 per VM |
+| RAM | 16 GB static per VM |
+| Disk | 500 GB dynamic VHDX |
+| vTPM | Enabled (local key protector) |
+| Network | `NATSwitch` — `192.168.100.0/24`, DHCP `100–200` |
+| Boot | ISO first (Azure Local installer) |
+
+## Scripts
+
+| Script | Location on host | Purpose |
+|---|---|---|
+| `setup.ps1` | `C:\Scripts\setup.ps1` | Configures the Hyper-V host and provisions the three nested VMs |
+| `Get-SffNodeVoucher.ps1` | `C:\Scripts\Get-SffNodeVoucher.ps1` | Retrieves FDO voucher PEM files from the provisioned nodes via SSH |
+| `setup_k3s_arc.sh` | `C:\Scripts\setup_k3s_arc.sh` | K3s server + Azure Arc on the management node (after all nodes are Arc-enabled) |
+| `k3s-join-agent.sh` | `C:\Scripts\k3s-join-agent.sh` | Installs K3s agent on a worker with `INSTALL_K3S_SKIP_SELINUX_RPM=true` |
+| `bootstrap-k3s-agents.sh` | `C:\Scripts\bootstrap-k3s-agents.sh` | From the K3s server node, SSHes to the other two nested VMs and runs the join script |
+| `vm-bootstrap.ps1` | `C:\Scripts\vm-bootstrap.ps1` | Hyper-V host bootstrap (also run once by Custom Script Extension) |
+| `K3S-CLUSTER-SETUP.txt` | `C:\Scripts\K3S-CLUSTER-SETUP.txt` | Step-by-step K3s cluster setup instructions (open in Notepad on the host) |
+
+Logs from `setup.ps1` are written to `C:\Scripts\setup.log`.
+
+## Notes
+
+- Do not commit `terraform.tfvars` or Bicep parameter files that contain secrets — the admin password must stay out of source control. The `.gitignore` excludes common cases by default.
+- The auto-shutdown schedule powers down the VM at 19:00 GMT daily to reduce costs.
+- `setup.ps1` is idempotent — it writes a completion flag (`C:\Scripts\.setup-completed`) and skips on subsequent runs.

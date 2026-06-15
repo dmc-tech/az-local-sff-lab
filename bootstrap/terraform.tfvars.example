@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and adjust as needed
+
+resource_group_name        = "rg-tfstate-uks"
+location                   = "UK South"
+storage_account_name_prefix = "tfstate"
+container_name             = "tfstate"
+# State file name (blob key) used by the main Hyper-V host Terraform
+state_file_key             = "azlocal-sff-lab-bootstrap.tfstate"
+
+tags = {
+  Purpose   = "Terraform state"
+  ManagedBy = "Terraform"
+}

@@ -1,0 +1,8 @@
+# Backend configuration for Terraform state in Azure Storage
+# Copy to backend.hcl and set values (from bootstrap outputs or your storage account).
+# Do not commit backend.hcl if it contains environment-specific or sensitive data.
+
+resource_group_name  = "rg-tfstate-uks"
+storage_account_name = "tfstateXXXXXXXX"   # From bootstrap output: storage_account_name
+container_name       = "tfstate"
+key                  = "hyperv-host.tfstate"   # Parameterised state file name (blob key)
