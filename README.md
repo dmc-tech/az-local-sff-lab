@@ -23,8 +23,8 @@ Azure Local SFF nodes require a [zero-touch provisioning (ZTP)](https://learn.mi
 
 **setup.ps1** runs automatically on first boot and configures the Hyper-V host:
 
-1. **Initialises the data disk** — brings the raw 1 TB disk online, partitions it as GPT, and formats it as NTFS on `F:\`
-2. **Creates directories** — sets up `F:\Hyper-V` for VM files, VHDs, and ISO images
+1. **Initialises the data disk** — brings the 1 TB disk online. A new disk is partitioned as GPT, given the next available drive letter (typically `E:`), and formatted as NTFS. An existing volume (from an earlier run, or a data disk reused after the VM was deleted) is used as-is with its current letter and contents.
+2. **Creates directories** — sets up `<data drive>:\Hyper-V` for VM files, VHDs, and ISO images
 3. **Downloads the OS image package** — fetches the Azure Local ZIP package (Terraform: `os_image_package_url`; Bicep: `osImagePackageUrl`), extracts `provision-os.iso`, and stages it for VM boot; the Configurator app URL is set the same way (`configurator_app_url` / `configuratorAppUrl`). See [Where to set the OS image package and Configurator app URLs](DEPLOYMENT.md#where-to-set-the-os-image-package-and-configurator-app-urls) in `DEPLOYMENT.md`.
 4. **Configures NAT networking** — creates an internal Hyper-V switch (`NATSwitch`) with a `192.168.100.0/24` subnet and NAT for outbound connectivity
 5. **Installs and configures DHCP** — sets up a DHCP scope (`192.168.100.100–200`) so the nested VMs receive IP addresses automatically

@@ -22,11 +22,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.2.2"
+$ScriptVersion = "1.3.0"
 $LogFile       = "C:\Scripts\setup.log"
 $CompletedFlag = "C:\Scripts\.setup-completed"
-$VHDRoot       = "F:\Hyper-V\Virtual Hard Disks"  # Data disk (formatted separately)
-$VMRoot   = "F:\Hyper-V"
+# Data-disk paths ($VHDRoot, $VMRoot, $OSImageDir, ...) are set by Set-DataPaths
+# once Initialize-DataDisk has found the data volume's drive letter.
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -54,20 +54,28 @@ $VMMemory = 16GB
 $VMCPUs   = 8
 
 $OSImageUrl  = $OsImagePackageUrl
-$OSImageDir  = "F:\Hyper-V\Images"
-$OSImageZipPath = "$OSImageDir\InstallerPackage.zip"
-$OSImageExtractDir = "$OSImageDir\extracted"
-$OSImagePath = "$OSImageDir\InstallOS.iso"
-$DotNetRuntimeInstallerPath = "$OSImageDir\windowsdesktop-runtime-9.0.14-win-x64.exe"
 $configuratorLeaf = [System.IO.Path]::GetFileName(([Uri]$ConfiguratorAppUrl).LocalPath)
 if ([string]::IsNullOrWhiteSpace($configuratorLeaf)) {
     $configuratorLeaf = "ConfiguratorAppInstaller"
 }
-# Use Path::Combine, not Join-Path: Join-Path resolves F: and fails before Initialize-DataDisk creates the volume.
-$ConfiguratorInstallerPath = [System.IO.Path]::Combine($OSImageDir, $configuratorLeaf)
 # Version-less filename follows /latest/ redirects to the current PuTTY release.
 $PuttyInstallerUrl = "https://the.earth.li/~sgtatham/putty/latest/w64/putty-64bit-installer.msi"
-$PuttyInstallerPath = "$OSImageDir\putty-64bit-installer.msi"
+
+# Sets every path that lives on the data volume, for whatever letter it has.
+function Set-DataPaths {
+    param([string]$DriveLetter)
+    $root = "${DriveLetter}:\Hyper-V"
+    $script:VMRoot                     = $root
+    $script:VHDRoot                    = "$root\Virtual Hard Disks"
+    $script:OSImageDir                 = "$root\Images"
+    $script:OSImageZipPath             = "$script:OSImageDir\InstallerPackage.zip"
+    $script:OSImageExtractDir          = "$script:OSImageDir\extracted"
+    $script:OSImagePath                = "$script:OSImageDir\InstallOS.iso"
+    $script:DotNetRuntimeInstallerPath = "$script:OSImageDir\windowsdesktop-runtime-9.0.14-win-x64.exe"
+    $script:ConfiguratorInstallerPath  = [System.IO.Path]::Combine($script:OSImageDir, $configuratorLeaf)
+    $script:PuttyInstallerPath         = "$script:OSImageDir\putty-64bit-installer.msi"
+}
+
 $VHDSize     = 500GB   # Thin-provisioned (dynamic) VHDX per VM
 $DownloadTimeoutSeconds = 1800
 $DownloadMaxAttempts = 8
@@ -91,11 +99,13 @@ function Write-Log {
 }
 
 # ---------------------------------------------------------------------------
-# Initialise the attached data disk (online -> GPT -> NTFS -> F:\)
-# Handles every state the disk can be in, not just RAW: not yet visible after
-# boot, initialised by an earlier partial run, already formatted but with a
-# different or no drive letter, and F: taken by the DVD drive. Existing
-# volumes are never reformatted.
+# Find and prepare the data disk, keeping whatever drive letter it has.
+# - New (RAW) disk: GPT, one partition, Windows assigns the next free letter,
+#   formatted NTFS "Data".
+# - Existing volume (earlier run, or a data disk reused from a deleted VM):
+#   used as-is - never relabelled or reformatted. A letter is only assigned
+#   if the partition has none.
+# Sets $script:DataDriveLetter; paths are derived from it by Set-DataPaths.
 # ---------------------------------------------------------------------------
 function Get-DataDiskCandidate {
     # Data disk = not the OS disk and not Azure's temporary disk; pick the largest.
@@ -107,86 +117,13 @@ function Get-DataDiskCandidate {
     } | Sort-Object Size -Descending | Select-Object -First 1
 }
 
-# Frees $DriveLetter when it is held by something unusable. Only called when
-# "<letter>:\" is not accessible, so no live file system is ever displaced.
-function Clear-DriveLetter {
-    param([string]$DriveLetter)
-
-    $logical = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID = '${DriveLetter}:'" -ErrorAction SilentlyContinue
-    $volume = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '${DriveLetter}:'" -ErrorAction SilentlyContinue
-
-    if ($logical -and $logical.DriveType -eq 4) {
-        throw "${DriveLetter}: is a mapped network drive ($($logical.ProviderName)). Remove it (net use ${DriveLetter}: /delete) and re-run."
-    }
-    if ($volume -and $volume.DriveType -eq 5) {
-        Set-CimInstance -InputObject $volume -Property @{ DriveLetter = "Z:" }
-        Write-Log "Moved CD/DVD drive from ${DriveLetter}: to Z:"
-        return
-    }
-    if ($volume) {
-        throw "${DriveLetter}: is assigned to volume $($volume.DeviceID) (type $($volume.DriveType), label '$($volume.Label)') that is not accessible. Free the letter in Disk Management and re-run."
-    }
-    if ($logical) {
-        # Present as a logical disk but not a volume: subst drive or similar.
-        throw "${DriveLetter}: is in use (Win32_LogicalDisk type $($logical.DriveType)), probably a subst drive. Remove it (subst ${DriveLetter}: /d) and re-run."
-    }
-
-    # Stale mount point left in the mount manager (e.g. a disk that was detached).
-    $mounts = (& mountvol.exe) -join "`n"
-    if ($mounts -match "(?m)^\s*${DriveLetter}:\\\s*$") {
-        & mountvol.exe "${DriveLetter}:" /D | Out-Null
-        Write-Log "Removed stale mount point ${DriveLetter}:\"
-    }
-}
-
-function Set-DataPartitionDriveLetter {
-    param($Partition, [string]$DriveLetter)
-
-    $current = "$($Partition.DriveLetter)".Trim([char]0).Trim()
-    Write-Log "Data partition drive letter is '$current' - assigning ${DriveLetter}:"
-    Clear-DriveLetter -DriveLetter $DriveLetter
-
-    try {
-        # Win32_Volume is more reliable than Set-Partition -NewDriveLetter, which can
-        # fail with MSFT_Partition return code 42012.
-        $vol = $null
-        if ($current) {
-            $vol = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '${current}:'" -ErrorAction SilentlyContinue
-        }
-        if ($vol) {
-            Set-CimInstance -InputObject $vol -Property @{ DriveLetter = "${DriveLetter}:" }
-        } else {
-            $Partition | Add-PartitionAccessPath -AccessPath "${DriveLetter}:\"
-        }
-    } catch {
-        Write-Log "Primary drive letter change failed ($($_.Exception.Message)); retrying via partition access paths"
-        try {
-            if ($current) {
-                $Partition | Remove-PartitionAccessPath -AccessPath "${current}:\"
-            }
-            Get-Partition -DiskNumber $Partition.DiskNumber -PartitionNumber $Partition.PartitionNumber |
-                Add-PartitionAccessPath -AccessPath "${DriveLetter}:\"
-        } catch {
-            $owners = Get-CimInstance -ClassName Win32_LogicalDisk |
-                      ForEach-Object { "$($_.DeviceID) type=$($_.DriveType) label='$($_.VolumeName)'" }
-            Write-Log "Drive letters in use: $($owners -join '; ')"
-            throw "Could not assign ${DriveLetter}: to the data partition: $($_.Exception.Message)"
-        }
-    }
-
-    Update-HostStorageCache -ErrorAction SilentlyContinue
-    Write-Log "Data partition is now ${DriveLetter}:"
+function Get-PartitionLetter {
+    param($Partition)
+    # DriveLetter is [char]0 when the partition has no letter.
+    return "$($Partition.DriveLetter)".Trim([char]0).Trim()
 }
 
 function Initialize-DataDisk {
-    $DriveLetter = "F"
-
-    # If F:\ already exists, skip
-    if (Test-Path "${DriveLetter}:\") {
-        Write-Log "Drive ${DriveLetter}:\ already exists - skipping disk initialisation"
-        return
-    }
-
     # The managed data disk can surface a little after first boot; wait for it.
     Write-Log "Looking for the data disk..."
     $deadline = (Get-Date).AddMinutes(10)
@@ -221,30 +158,40 @@ function Initialize-DataDisk {
         Write-Log "Disk $($disk.Number) already initialised ($($disk.PartitionStyle)) - reusing it"
     }
 
-    # Reuse an existing data partition (earlier partial run) or create one.
+    # Reuse the existing data partition (earlier run / reused disk) or create one.
     $partition = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue |
                  Where-Object { $_.Type -eq "Basic" -or $_.Type -eq "IFS" } |
                  Sort-Object Size -Descending | Select-Object -First 1
     if (-not $partition) {
-        $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize
+        $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter
         Write-Log "Created partition $($partition.PartitionNumber) on disk $($disk.Number)"
     }
 
-    if ($partition.DriveLetter -ne $DriveLetter) {
-        Set-DataPartitionDriveLetter -Partition $partition -DriveLetter $DriveLetter
-    }
-
-    $volume = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
-    if (-not $volume -or [string]::IsNullOrEmpty($volume.FileSystem) -or $volume.FileSystem -eq "RAW") {
-        Format-Volume -DriveLetter $DriveLetter -FileSystem NTFS -NewFileSystemLabel "Data" -Confirm:$false | Out-Null
-        Write-Log "Volume ${DriveLetter}: formatted as NTFS"
+    $letter = Get-PartitionLetter $partition
+    if (-not $letter) {
+        $partition | Add-PartitionAccessPath -AssignDriveLetter
+        $partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
+        $letter = Get-PartitionLetter $partition
+        if (-not $letter) {
+            throw "Could not assign a drive letter to partition $($partition.PartitionNumber) on disk $($disk.Number)."
+        }
+        Write-Log "Assigned next available drive letter ${letter}:"
     } else {
-        Write-Log "Volume ${DriveLetter}: already formatted ($($volume.FileSystem), label '$($volume.FileSystemLabel)') - not reformatting"
+        Write-Log "Using existing drive letter ${letter}:"
     }
 
-    if (-not (Test-Path "${DriveLetter}:\")) {
-        throw "Data disk setup finished but ${DriveLetter}:\ is not accessible."
+    $volume = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue
+    if (-not $volume -or [string]::IsNullOrEmpty($volume.FileSystem) -or $volume.FileSystem -eq "RAW") {
+        Format-Volume -DriveLetter $letter -FileSystem NTFS -NewFileSystemLabel "Data" -Confirm:$false | Out-Null
+        Write-Log "Volume ${letter}: formatted as NTFS"
+    } else {
+        Write-Log "Volume ${letter}: already formatted ($($volume.FileSystem), label '$($volume.FileSystemLabel)') - reusing existing contents"
     }
+
+    if (-not (Test-Path "${letter}:\")) {
+        throw "Data disk setup finished but ${letter}:\ is not accessible."
+    }
+    $script:DataDriveLetter = $letter
 }
 
 # ---------------------------------------------------------------------------
@@ -1064,6 +1011,8 @@ try {
 
     Write-Log "--- Initialising data disk ---"
     Initialize-DataDisk
+    Set-DataPaths -DriveLetter $script:DataDriveLetter
+    Write-Log "Data volume: $($script:DataDriveLetter): (VMs and images under $VMRoot)"
 
     Write-Log "--- Creating directories ---"
     Initialize-Directories
