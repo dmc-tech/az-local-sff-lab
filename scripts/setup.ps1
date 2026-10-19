@@ -22,7 +22,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.2.0"
+$ScriptVersion = "1.2.1"
 $LogFile       = "C:\Scripts\setup.log"
 $CompletedFlag = "C:\Scripts\.setup-completed"
 $VHDRoot       = "F:\Hyper-V\Virtual Hard Disks"  # Data disk (formatted separately)
@@ -91,8 +91,22 @@ function Write-Log {
 }
 
 # ---------------------------------------------------------------------------
-# Initialise the attached data disk (raw -> online -> GPT -> NTFS -> F:\)
+# Initialise the attached data disk (online -> GPT -> NTFS -> F:\)
+# Handles every state the disk can be in, not just RAW: not yet visible after
+# boot, initialised by an earlier partial run, already formatted but with a
+# different or no drive letter, and F: taken by the DVD drive. Existing
+# volumes are never reformatted.
 # ---------------------------------------------------------------------------
+function Get-DataDiskCandidate {
+    # Data disk = not the OS disk and not Azure's temporary disk; pick the largest.
+    Get-Disk | Where-Object {
+        $_.Size -gt 0 -and -not $_.IsBoot -and -not $_.IsSystem -and
+        -not (Get-Partition -DiskNumber $_.Number -ErrorAction SilentlyContinue |
+              Get-Volume -ErrorAction SilentlyContinue |
+              Where-Object { $_.FileSystemLabel -eq "Temporary Storage" })
+    } | Sort-Object Size -Descending | Select-Object -First 1
+}
+
 function Initialize-DataDisk {
     $DriveLetter = "F"
 
@@ -102,35 +116,72 @@ function Initialize-DataDisk {
         return
     }
 
-    Write-Log "Looking for raw (not-initialised) data disks..."
-    $rawDisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -gt 0 } | Select-Object -First 1
-    if (-not $rawDisk) {
-        throw "No raw data disk found to initialise. Is the 1 TB disk attached?"
+    # The managed data disk can surface a little after first boot; wait for it.
+    Write-Log "Looking for the data disk..."
+    $deadline = (Get-Date).AddMinutes(10)
+    $disk = $null
+    while ($true) {
+        Update-HostStorageCache -ErrorAction SilentlyContinue
+        $disk = Get-DataDiskCandidate
+        if ($disk -or (Get-Date) -ge $deadline) { break }
+        Write-Log "Data disk not visible yet - retrying in 15s"
+        Start-Sleep -Seconds 15
+    }
+    if (-not $disk) {
+        $seen = (Get-Disk | ForEach-Object { "#$($_.Number) $([math]::Round($_.Size / 1GB))GB $($_.PartitionStyle) boot=$($_.IsBoot)" }) -join "; "
+        throw "No data disk found after 10 minutes (disks seen: $seen). Check the 1 TB disk is attached to the VM at LUN 0."
+    }
+    Write-Log "Data disk: Number=$($disk.Number), Size=$([math]::Round($disk.Size / 1GB)) GB, PartitionStyle=$($disk.PartitionStyle), Offline=$($disk.IsOffline)"
+
+    if ($disk.IsOffline) {
+        Set-Disk -Number $disk.Number -IsOffline $false
+        Write-Log "Disk $($disk.Number) brought online"
+    }
+    if ($disk.IsReadOnly) {
+        Set-Disk -Number $disk.Number -IsReadOnly $false
+        Write-Log "Disk $($disk.Number) read-only cleared"
     }
 
-    Write-Log "Found raw disk: Number=$($rawDisk.Number), Size=$([math]::Round($rawDisk.Size / 1GB)) GB"
-
-    # Bring online if offline
-    if ($rawDisk.IsOffline) {
-        Set-Disk -Number $rawDisk.Number -IsOffline $false
-        Write-Log "Disk $($rawDisk.Number) brought online"
+    # F: may be held by the DVD drive; move it to Z: so the data volume can use F:
+    $cd = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '${DriveLetter}:'" -ErrorAction SilentlyContinue
+    if ($cd -and $cd.DriveType -eq 5) {
+        Set-CimInstance -InputObject $cd -Property @{ DriveLetter = "Z:" }
+        Write-Log "Moved CD/DVD drive from ${DriveLetter}: to Z:"
     }
 
-    # Clear read-only
-    if ($rawDisk.IsReadOnly) {
-        Set-Disk -Number $rawDisk.Number -IsReadOnly $false
-        Write-Log "Disk $($rawDisk.Number) read-only cleared"
+    $disk = Get-Disk -Number $disk.Number
+    if ($disk.PartitionStyle -eq "RAW") {
+        Initialize-Disk -Number $disk.Number -PartitionStyle GPT -Confirm:$false
+        Write-Log "Disk $($disk.Number) initialised as GPT"
+    } else {
+        Write-Log "Disk $($disk.Number) already initialised ($($disk.PartitionStyle)) - reusing it"
     }
 
-    # Initialise as GPT, create partition, format NTFS
-    Initialize-Disk -Number $rawDisk.Number -PartitionStyle GPT -Confirm:$false
-    Write-Log "Disk $($rawDisk.Number) initialised as GPT"
+    # Reuse an existing data partition (earlier partial run) or create one.
+    $partition = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Type -eq "Basic" -or $_.Type -eq "IFS" } |
+                 Sort-Object Size -Descending | Select-Object -First 1
+    if (-not $partition) {
+        $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize
+        Write-Log "Created partition $($partition.PartitionNumber) on disk $($disk.Number)"
+    }
 
-    $partition = New-Partition -DiskNumber $rawDisk.Number -UseMaximumSize -DriveLetter $DriveLetter
-    Write-Log "Partition created with drive letter ${DriveLetter}:"
+    if ($partition.DriveLetter -ne $DriveLetter) {
+        Write-Log "Partition drive letter is '$($partition.DriveLetter)' - assigning ${DriveLetter}:"
+        Set-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -NewDriveLetter $DriveLetter
+    }
 
-    Format-Volume -DriveLetter $DriveLetter -FileSystem NTFS -NewFileSystemLabel "Data" -Confirm:$false | Out-Null
-    Write-Log "Volume ${DriveLetter}: formatted as NTFS"
+    $volume = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
+    if (-not $volume -or [string]::IsNullOrEmpty($volume.FileSystem) -or $volume.FileSystem -eq "RAW") {
+        Format-Volume -DriveLetter $DriveLetter -FileSystem NTFS -NewFileSystemLabel "Data" -Confirm:$false | Out-Null
+        Write-Log "Volume ${DriveLetter}: formatted as NTFS"
+    } else {
+        Write-Log "Volume ${DriveLetter}: already formatted ($($volume.FileSystem), label '$($volume.FileSystemLabel)') - not reformatting"
+    }
+
+    if (-not (Test-Path "${DriveLetter}:\")) {
+        throw "Data disk setup finished but ${DriveLetter}:\ is not accessible."
+    }
 }
 
 # ---------------------------------------------------------------------------
