@@ -22,7 +22,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.2.1"
+$ScriptVersion = "1.2.2"
 $LogFile       = "C:\Scripts\setup.log"
 $CompletedFlag = "C:\Scripts\.setup-completed"
 $VHDRoot       = "F:\Hyper-V\Virtual Hard Disks"  # Data disk (formatted separately)
@@ -107,6 +107,77 @@ function Get-DataDiskCandidate {
     } | Sort-Object Size -Descending | Select-Object -First 1
 }
 
+# Frees $DriveLetter when it is held by something unusable. Only called when
+# "<letter>:\" is not accessible, so no live file system is ever displaced.
+function Clear-DriveLetter {
+    param([string]$DriveLetter)
+
+    $logical = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID = '${DriveLetter}:'" -ErrorAction SilentlyContinue
+    $volume = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '${DriveLetter}:'" -ErrorAction SilentlyContinue
+
+    if ($logical -and $logical.DriveType -eq 4) {
+        throw "${DriveLetter}: is a mapped network drive ($($logical.ProviderName)). Remove it (net use ${DriveLetter}: /delete) and re-run."
+    }
+    if ($volume -and $volume.DriveType -eq 5) {
+        Set-CimInstance -InputObject $volume -Property @{ DriveLetter = "Z:" }
+        Write-Log "Moved CD/DVD drive from ${DriveLetter}: to Z:"
+        return
+    }
+    if ($volume) {
+        throw "${DriveLetter}: is assigned to volume $($volume.DeviceID) (type $($volume.DriveType), label '$($volume.Label)') that is not accessible. Free the letter in Disk Management and re-run."
+    }
+    if ($logical) {
+        # Present as a logical disk but not a volume: subst drive or similar.
+        throw "${DriveLetter}: is in use (Win32_LogicalDisk type $($logical.DriveType)), probably a subst drive. Remove it (subst ${DriveLetter}: /d) and re-run."
+    }
+
+    # Stale mount point left in the mount manager (e.g. a disk that was detached).
+    $mounts = (& mountvol.exe) -join "`n"
+    if ($mounts -match "(?m)^\s*${DriveLetter}:\\\s*$") {
+        & mountvol.exe "${DriveLetter}:" /D | Out-Null
+        Write-Log "Removed stale mount point ${DriveLetter}:\"
+    }
+}
+
+function Set-DataPartitionDriveLetter {
+    param($Partition, [string]$DriveLetter)
+
+    $current = "$($Partition.DriveLetter)".Trim([char]0).Trim()
+    Write-Log "Data partition drive letter is '$current' - assigning ${DriveLetter}:"
+    Clear-DriveLetter -DriveLetter $DriveLetter
+
+    try {
+        # Win32_Volume is more reliable than Set-Partition -NewDriveLetter, which can
+        # fail with MSFT_Partition return code 42012.
+        $vol = $null
+        if ($current) {
+            $vol = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '${current}:'" -ErrorAction SilentlyContinue
+        }
+        if ($vol) {
+            Set-CimInstance -InputObject $vol -Property @{ DriveLetter = "${DriveLetter}:" }
+        } else {
+            $Partition | Add-PartitionAccessPath -AccessPath "${DriveLetter}:\"
+        }
+    } catch {
+        Write-Log "Primary drive letter change failed ($($_.Exception.Message)); retrying via partition access paths"
+        try {
+            if ($current) {
+                $Partition | Remove-PartitionAccessPath -AccessPath "${current}:\"
+            }
+            Get-Partition -DiskNumber $Partition.DiskNumber -PartitionNumber $Partition.PartitionNumber |
+                Add-PartitionAccessPath -AccessPath "${DriveLetter}:\"
+        } catch {
+            $owners = Get-CimInstance -ClassName Win32_LogicalDisk |
+                      ForEach-Object { "$($_.DeviceID) type=$($_.DriveType) label='$($_.VolumeName)'" }
+            Write-Log "Drive letters in use: $($owners -join '; ')"
+            throw "Could not assign ${DriveLetter}: to the data partition: $($_.Exception.Message)"
+        }
+    }
+
+    Update-HostStorageCache -ErrorAction SilentlyContinue
+    Write-Log "Data partition is now ${DriveLetter}:"
+}
+
 function Initialize-DataDisk {
     $DriveLetter = "F"
 
@@ -142,13 +213,6 @@ function Initialize-DataDisk {
         Write-Log "Disk $($disk.Number) read-only cleared"
     }
 
-    # F: may be held by the DVD drive; move it to Z: so the data volume can use F:
-    $cd = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '${DriveLetter}:'" -ErrorAction SilentlyContinue
-    if ($cd -and $cd.DriveType -eq 5) {
-        Set-CimInstance -InputObject $cd -Property @{ DriveLetter = "Z:" }
-        Write-Log "Moved CD/DVD drive from ${DriveLetter}: to Z:"
-    }
-
     $disk = Get-Disk -Number $disk.Number
     if ($disk.PartitionStyle -eq "RAW") {
         Initialize-Disk -Number $disk.Number -PartitionStyle GPT -Confirm:$false
@@ -167,8 +231,7 @@ function Initialize-DataDisk {
     }
 
     if ($partition.DriveLetter -ne $DriveLetter) {
-        Write-Log "Partition drive letter is '$($partition.DriveLetter)' - assigning ${DriveLetter}:"
-        Set-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -NewDriveLetter $DriveLetter
+        Set-DataPartitionDriveLetter -Partition $partition -DriveLetter $DriveLetter
     }
 
     $volume = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
