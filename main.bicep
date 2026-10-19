@@ -59,6 +59,15 @@ param k3sBootstrapAgentsScriptFileName string = 'bootstrap-k3s-agents.sh'
 @description('Blob name for K3S-CLUSTER-SETUP.txt on the Hyper-V host (K3s setup instructions).')
 param k3sSetupInstructionsFileName string = 'K3S-CLUSTER-SETUP.txt'
 
+@description('Blob name for Deploy-K3sCluster.ps1 (host-side K3s cluster orchestrator).')
+param k3sDeployScriptFileName string = 'Deploy-K3sCluster.ps1'
+
+@description('Blob name for k3s-node-prep.sh (nested VM preparation for K3s).')
+param k3sNodePrepScriptFileName string = 'k3s-node-prep.sh'
+
+@description('Blob name for k3s-install-server.sh (K3s server install, single or HA).')
+param k3sInstallServerScriptFileName string = 'k3s-install-server.sh'
+
 @description('URL for the Azure Local OS package or direct ISO URL (passed to setup.ps1).')
 param osImagePackageUrl string = 'https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/OS-Composition-Linux/10.2604.0.3100/roe-10.2604.0.3100.zip'
 
@@ -93,6 +102,9 @@ var k3sArcScriptPath = 'scripts/setup-k3s-arc.sh'
 var k3sJoinAgentScriptPath = 'scripts/k3s-join-agent.sh'
 var k3sBootstrapAgentsScriptPath = 'scripts/bootstrap-k3s-agents.sh'
 var k3sSetupInstructionsPath = 'scripts/K3S-CLUSTER-SETUP.txt'
+var k3sDeployScriptPath = 'scripts/Deploy-K3sCluster.ps1'
+var k3sNodePrepScriptPath = 'scripts/k3s-node-prep.sh'
+var k3sInstallServerScriptPath = 'scripts/k3s-install-server.sh'
 
 var setupScriptContent = loadTextContent(setupScriptPath)
 var voucherScriptContent = loadTextContent(voucherScriptPath)
@@ -101,6 +113,9 @@ var k3sArcScriptContent = loadTextContent(k3sArcScriptPath)
 var k3sJoinAgentScriptContent = loadTextContent(k3sJoinAgentScriptPath)
 var k3sBootstrapAgentsScriptContent = loadTextContent(k3sBootstrapAgentsScriptPath)
 var k3sSetupInstructionsContent = loadTextContent(k3sSetupInstructionsPath)
+var k3sDeployScriptContent = loadTextContent(k3sDeployScriptPath)
+var k3sNodePrepScriptContent = loadTextContent(k3sNodePrepScriptPath)
+var k3sInstallServerScriptContent = loadTextContent(k3sInstallServerScriptPath)
 
 var locationSlug = replace(toLower(location), ' ', '-')
 var vnetName = 'vnet-hyperv-${locationSlug}'
@@ -120,7 +135,7 @@ var flowLogsAccountName = substring(flowLogsAccountNameFull, 0, min(length(flowL
 var networkWatcherName = 'nw-${locationSlug}'
 var flowLogName = 'flowlog-${vnetName}'
 
-var extensionTimestamp = customScriptTimestamp + length(setupScriptContent) + length(voucherScriptContent) + length(bootstrapScriptContent) + length(k3sArcScriptContent) + length(k3sJoinAgentScriptContent) + length(k3sBootstrapAgentsScriptContent) + length(k3sSetupInstructionsContent)
+var extensionTimestamp = customScriptTimestamp + length(setupScriptContent) + length(voucherScriptContent) + length(bootstrapScriptContent) + length(k3sArcScriptContent) + length(k3sJoinAgentScriptContent) + length(k3sBootstrapAgentsScriptContent) + length(k3sSetupInstructionsContent) + length(k3sDeployScriptContent) + length(k3sNodePrepScriptContent) + length(k3sInstallServerScriptContent)
 
 // --- Virtual network ---
 resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
@@ -400,6 +415,30 @@ resource seedScripts 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
         name: 'K3S_SETUP_INSTRUCTIONS_NAME'
         value: k3sSetupInstructionsFileName
       }
+      {
+        name: 'K3S_DEPLOY_CONTENT'
+        value: k3sDeployScriptContent
+      }
+      {
+        name: 'K3S_DEPLOY_NAME'
+        value: k3sDeployScriptFileName
+      }
+      {
+        name: 'K3S_NODE_PREP_CONTENT'
+        value: k3sNodePrepScriptContent
+      }
+      {
+        name: 'K3S_NODE_PREP_NAME'
+        value: k3sNodePrepScriptFileName
+      }
+      {
+        name: 'K3S_INSTALL_SERVER_CONTENT'
+        value: k3sInstallServerScriptContent
+      }
+      {
+        name: 'K3S_INSTALL_SERVER_NAME'
+        value: k3sInstallServerScriptFileName
+      }
     ]
     scriptContent: '''
 set -e
@@ -410,6 +449,9 @@ printf '%s' "$K3S_ARC_CONTENT" > /tmp/setup_k3s_arc.sh
 printf '%s' "$K3S_JOIN_AGENT_CONTENT" > /tmp/k3s_join_agent.sh
 printf '%s' "$K3S_BOOTSTRAP_AGENTS_CONTENT" > /tmp/bootstrap_k3s_agents.sh
 printf '%s' "$K3S_SETUP_INSTRUCTIONS_CONTENT" > /tmp/k3s_cluster_setup.txt
+printf '%s' "$K3S_DEPLOY_CONTENT" > /tmp/k3s_deploy.ps1
+printf '%s' "$K3S_NODE_PREP_CONTENT" > /tmp/k3s_node_prep.sh
+printf '%s' "$K3S_INSTALL_SERVER_CONTENT" > /tmp/k3s_install_server.sh
 az storage blob upload --account-name "$AZURE_STORAGE_ACCOUNT" --account-key "$AZURE_STORAGE_KEY" -c scripts -f /tmp/setup.ps1 -n "$SETUP_NAME" --overwrite
 az storage blob upload --account-name "$AZURE_STORAGE_ACCOUNT" --account-key "$AZURE_STORAGE_KEY" -c scripts -f /tmp/voucher.ps1 -n "$VOUCHER_NAME" --overwrite
 az storage blob upload --account-name "$AZURE_STORAGE_ACCOUNT" --account-key "$AZURE_STORAGE_KEY" -c scripts -f /tmp/bootstrap.ps1 -n "$BOOTSTRAP_NAME" --overwrite
@@ -417,6 +459,9 @@ az storage blob upload --account-name "$AZURE_STORAGE_ACCOUNT" --account-key "$A
 az storage blob upload --account-name "$AZURE_STORAGE_ACCOUNT" --account-key "$AZURE_STORAGE_KEY" -c scripts -f /tmp/k3s_join_agent.sh -n "$K3S_JOIN_AGENT_NAME" --overwrite
 az storage blob upload --account-name "$AZURE_STORAGE_ACCOUNT" --account-key "$AZURE_STORAGE_KEY" -c scripts -f /tmp/bootstrap_k3s_agents.sh -n "$K3S_BOOTSTRAP_AGENTS_NAME" --overwrite
 az storage blob upload --account-name "$AZURE_STORAGE_ACCOUNT" --account-key "$AZURE_STORAGE_KEY" -c scripts -f /tmp/k3s_cluster_setup.txt -n "$K3S_SETUP_INSTRUCTIONS_NAME" --overwrite
+az storage blob upload --account-name "$AZURE_STORAGE_ACCOUNT" --account-key "$AZURE_STORAGE_KEY" -c scripts -f /tmp/k3s_deploy.ps1 -n "$K3S_DEPLOY_NAME" --overwrite
+az storage blob upload --account-name "$AZURE_STORAGE_ACCOUNT" --account-key "$AZURE_STORAGE_KEY" -c scripts -f /tmp/k3s_node_prep.sh -n "$K3S_NODE_PREP_NAME" --overwrite
+az storage blob upload --account-name "$AZURE_STORAGE_ACCOUNT" --account-key "$AZURE_STORAGE_KEY" -c scripts -f /tmp/k3s_install_server.sh -n "$K3S_INSTALL_SERVER_NAME" --overwrite
 '''
   }
   dependsOn: [
@@ -447,7 +492,9 @@ var commandToExecute = join([
   bootstrapScriptFileName
   ' -K3sSetupInstructionsFileName '
   k3sSetupInstructionsFileName
-  ' -OsImagePackageUrl \u{22}'
+  ' -AdditionalScriptFileNames \u{22}'
+  join([k3sDeployScriptFileName, k3sNodePrepScriptFileName, k3sInstallServerScriptFileName], ',')
+  '\u{22} -OsImagePackageUrl \u{22}'
   osImagePackageUrl
   '\u{22} -ConfiguratorAppUrl \u{22}'
   configuratorAppUrl
@@ -539,6 +586,9 @@ resource vmExtension 'Microsoft.Compute/virtualMachines/extensions@2024-03-01' =
         '${blobBaseNormalized}scripts/${k3sJoinAgentScriptFileName}'
         '${blobBaseNormalized}scripts/${k3sBootstrapAgentsScriptFileName}'
         '${blobBaseNormalized}scripts/${k3sSetupInstructionsFileName}'
+        '${blobBaseNormalized}scripts/${k3sDeployScriptFileName}'
+        '${blobBaseNormalized}scripts/${k3sNodePrepScriptFileName}'
+        '${blobBaseNormalized}scripts/${k3sInstallServerScriptFileName}'
       ]
       commandToExecute: commandToExecute
     }

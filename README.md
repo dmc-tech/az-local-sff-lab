@@ -145,9 +145,29 @@ ssh-keygen -t rsa -N '""' -f C:\Users\azureadmin\.ssh\id_rsa
 # Then distribute the public key to each node once SSH is available
 ```
 
-2. **K3s cluster.** On the Hyper-V host, open **`C:\Scripts\K3S-CLUSTER-SETUP.txt`** (Notepad). All three nested VMs must be **provisioned and Arc-enabled** first; SSH then uses **`clouduser`** and the private key downloaded from the Azure portal provisioning flow. Scripts include `setup_k3s_arc.sh`, `k3s-join-agent.sh`, and `bootstrap-k3s-agents.sh`.
+2. **K3s cluster (automated).** Once the nested VMs are **provisioned and Arc-enabled** in the portal, copy the `clouduser` private key that the portal provisioning flow downloaded into **`C:\Scripts\keys\`** on the Hyper-V host, then run one command from an elevated PowerShell:
 
-   If `C:\Scripts` is missing files after you changed the repo, run **`terraform apply`** again so the Custom Script Extension re-runs (the extension timestamp changes when script content changes). Check extension status under the VM → **Extensions** in the Azure portal, or logs under `C:\WindowsAzure\Logs\Plugins\Microsoft.Compute.CustomScriptExtension\`.
+```powershell
+C:\Scripts\Deploy-K3sCluster.ps1 -Wait -InstallKubectl
+```
+
+   The script discovers the node IPs, waits until every node accepts SSH, prepares the nodes, installs the K3s server on `NestedVM-01`, joins the others, waits for all nodes to be `Ready`, and writes a kubeconfig to `C:\Scripts\k3s\kubeconfig`. It is idempotent, so you can safely re-run it after a failure.
+
+```powershell
+$env:KUBECONFIG = 'C:\Scripts\k3s\kubeconfig'
+C:\Scripts\k3s\bin\kubectl.exe get nodes -o wide
+```
+
+| Option | Effect |
+|---|---|
+| `-Topology HA` | All three nodes run as servers with embedded etcd, so the cluster survives the loss of any one node (default `ServerAgents`: 1 server + 2 agents) |
+| `-K3sVersion v1.33.5+k3s1` | Pin a K3s release (default: stable channel) |
+| `-EnableArc` | Connect the cluster to Azure Arc with Azure RBAC; add `-ArcServicePrincipal`/`-ArcTenantId` for unattended login, otherwise a device code is shown |
+| `-SshKeyPath` / `-NodeIPs` | Override key discovery / node discovery |
+
+   Full instructions, the manual fallback, and troubleshooting are in **`C:\Scripts\K3S-CLUSTER-SETUP.txt`** ([source](scripts/K3S-CLUSTER-SETUP.txt)). Requirements: `clouduser` needs passwordless sudo, and the nodes need outbound HTTPS to `get.k3s.io` and `github.com`.
+
+   If `C:\Scripts` is missing files after you changed the repo, run **`terraform apply`** again so the Custom Script Extension re-runs (the extension timestamp changes when script content changes; the re-run reboots the host). For Bicep, also rebuild `main.json` (`az bicep build --file main.bicep`) if you deploy from the JSON. Check extension status under the VM → **Extensions** in the Azure portal, or logs under `C:\WindowsAzure\Logs\Plugins\Microsoft.Compute.CustomScriptExtension\`.
 
 ## Azure Resources Created
 
@@ -163,7 +183,7 @@ The following table matches the **Terraform** variable names; Bicep uses the par
 | Azure Bastion | Secure RDP access to the host |
 | Windows Server VM | `Standard_E32s_v5`, Windows Server 2025 Datacenter |
 | Data disk | 1 TB Premium LRS, attached as LUN 0 |
-| Storage account | Holds provisioning scripts (`setup.ps1`, `Get-SffNodeVoucher.ps1`, `vm-bootstrap.ps1`, `setup_k3s_arc.sh`, `k3s-join-agent.sh`, `bootstrap-k3s-agents.sh`, `K3S-CLUSTER-SETUP.txt`) |
+| Storage account | Holds provisioning scripts (`setup.ps1`, `Get-SffNodeVoucher.ps1`, `vm-bootstrap.ps1`, `Deploy-K3sCluster.ps1`, `k3s-node-prep.sh`, `k3s-install-server.sh`, `setup_k3s_arc.sh`, `k3s-join-agent.sh`, `bootstrap-k3s-agents.sh`, `K3S-CLUSTER-SETUP.txt`) |
 
 ## Optional: Virtual Network flow logs (Traffic Analytics) for Arc troubleshooting
 
@@ -250,9 +270,12 @@ NTANetAnalytics
 |---|---|---|
 | `setup.ps1` | `C:\Scripts\setup.ps1` | Configures the Hyper-V host and provisions nested VMs (count from `nested_vm_count` / `nestedVmCount`) |
 | `Get-SffNodeVoucher.ps1` | `C:\Scripts\Get-SffNodeVoucher.ps1` | Retrieves FDO voucher PEM files from the provisioned nodes via SSH |
-| `setup_k3s_arc.sh` | `C:\Scripts\setup_k3s_arc.sh` | K3s server + Azure Arc on the management node (after all nodes are Arc-enabled) |
+| `Deploy-K3sCluster.ps1` | `C:\Scripts\Deploy-K3sCluster.ps1` | Builds the whole K3s cluster from the host over SSH (discovery, node prep, server/agent or HA install, kubeconfig, optional Arc) |
+| `k3s-node-prep.sh` | `C:\Scripts\k3s-node-prep.sh` | Node prep: kernel modules, sysctl, firewall rules for cluster traffic, egress check |
+| `k3s-install-server.sh` | `C:\Scripts\k3s-install-server.sh` | Installs a K3s server: first server (single or HA `cluster-init`) or an additional HA server |
+| `setup_k3s_arc.sh` | `C:\Scripts\setup_k3s_arc.sh` | Connects the cluster to Azure Arc and configures Azure RBAC (device code or service principal) |
 | `k3s-join-agent.sh` | `C:\Scripts\k3s-join-agent.sh` | Installs K3s agent on a worker with `INSTALL_K3S_SKIP_SELINUX_RPM=true` |
-| `bootstrap-k3s-agents.sh` | `C:\Scripts\bootstrap-k3s-agents.sh` | From the K3s server node, SSHes to the other two nested VMs and runs the join script |
+| `bootstrap-k3s-agents.sh` | `C:\Scripts\bootstrap-k3s-agents.sh` | Manual alternative: from the K3s server node, SSHes to the workers and runs the join script |
 | `vm-bootstrap.ps1` | `C:\Scripts\vm-bootstrap.ps1` | Hyper-V host bootstrap (also run once by Custom Script Extension) |
 | `K3S-CLUSTER-SETUP.txt` | `C:\Scripts\K3S-CLUSTER-SETUP.txt` | Step-by-step K3s cluster setup instructions (open in Notepad on the host) |
 

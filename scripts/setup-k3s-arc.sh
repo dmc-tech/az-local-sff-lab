@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+# The K3s installer uses /opt/bin when /usr/local/bin is read-only; sudo may not have either on PATH.
+export PATH="$PATH:/usr/local/bin:/opt/bin"
+
 ###############################################################################
 # K3s Install + Azure Arc Connected Cluster Setup Script
 #
@@ -26,7 +29,24 @@ set -euo pipefail
 #
 # Or override defaults with environment variables:
 #   RESOURCE_GROUP=myRG CLUSTER_NAME=myCluster LOCATION=eastus sudo -E ./setup-k3s-arc.sh
+#
+# Non-interactive login (used by Deploy-K3sCluster.ps1): put these in ENV_FILE
+# (default /tmp/k3s-lab/arc.env, sourced when present) instead of using a device code:
+#   AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID [, AZURE_SUBSCRIPTION_ID]
+# The service principal needs Contributor on the resource group, plus
+# User Access Administrator (or Owner) when Azure RBAC is enabled.
+#
+# Other switches:
+#   SKIP_AZURE_RBAC=true    - connect to Arc only (skip steps 5-6)
+#   ARC_WEBHOOKS_ONLY=true  - only run step 6; use on additional HA servers after
+#                             the first server has been connected and RBAC enabled
 ###############################################################################
+
+ENV_FILE="${ENV_FILE:-/tmp/k3s-lab/arc.env}"
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+fi
 
 # ── Configurable variables (override via environment) ────────────────────────
 RESOURCE_GROUP="${RESOURCE_GROUP:-arc-k3s-rg}"
@@ -36,6 +56,13 @@ K3S_VERSION="${K3S_VERSION:-}"            # leave empty for latest stable
 ONBOARDING_TIMEOUT="${ONBOARDING_TIMEOUT:-1200}"
 AZ_CLI_IMAGE="${AZ_CLI_IMAGE:-mcr.microsoft.com/azure-cli:latest}"
 AZ_STATE_DIR="/tmp/az-cli-state"          # persists Azure login state between runs
+SKIP_AZURE_RBAC="${SKIP_AZURE_RBAC:-false}"
+ARC_WEBHOOKS_ONLY="${ARC_WEBHOOKS_ONLY:-false}"
+export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
+
+# Use the kubectl bundled with K3s: the /usr/local/bin symlink may not exist on
+# read-only images (the installer falls back to /opt/bin, which sudo may not have on PATH).
+kubectl() { k3s kubectl "$@"; }
 
 # ── Helper functions ─────────────────────────────────────────────────────────
 log()  { echo -e "\n\033[1;32m[INFO]\033[0m  $*"; }
@@ -69,6 +96,27 @@ run_az_interactive() {
     "${AZ_CLI_IMAGE}" \
     "${container_id}" \
     az "$@"
+}
+
+# Service principal login. The secret goes to the container through an env file
+# (mode 600, removed afterwards) so it never appears in a process command line.
+az_login_service_principal() {
+  local env_file container_id="az-cli-$(date +%s%N)"
+  env_file="$(mktemp)"
+  chmod 600 "$env_file"
+  printf 'AZURE_CLIENT_ID=%s\nAZURE_CLIENT_SECRET=%s\nAZURE_TENANT_ID=%s\n' \
+    "$AZURE_CLIENT_ID" "$AZURE_CLIENT_SECRET" "$AZURE_TENANT_ID" >"$env_file"
+  local rc=0
+  k3s ctr run \
+    --rm \
+    --net-host \
+    --env-file "$env_file" \
+    --mount "type=bind,src=${AZ_STATE_DIR},dst=/root/.azure,options=rbind:rw" \
+    "${AZ_CLI_IMAGE}" \
+    "${container_id}" \
+    bash -c 'az login --service-principal -u "$AZURE_CLIENT_ID" -p "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID" -o none' || rc=$?
+  rm -f "$env_file"
+  (( rc == 0 )) || err "Service principal login failed (exit $rc)."
 }
 
 check_root() {
@@ -139,8 +187,9 @@ configure_kubeconfig() {
 setup_azure_cli() {
   log "Step 3/6 — Setting up Azure CLI container and connectedk8s extension..."
 
-  # Create persistent state dir for Azure login tokens
+  # Create persistent state dir for Azure login tokens (root only)
   mkdir -p "$AZ_STATE_DIR"
+  chmod 700 "$AZ_STATE_DIR"
 
   # Pull the Azure CLI image into K3s's containerd
   log "Pulling Azure CLI container image: ${AZ_CLI_IMAGE}..."
@@ -156,12 +205,22 @@ setup_azure_cli() {
   run_az extension add --name connectedk8s --yes 2>/dev/null || \
     run_az extension update --name connectedk8s --yes 2>/dev/null || true
 
-  # Log in to Azure via device code (no browser on the device)
+  # Log in: service principal when credentials are supplied, otherwise device code
   if ! run_az account show &>/dev/null; then
-    log "Please log in to Azure using a device code..."
-    run_az_interactive login --use-device-code
+    if [[ -n "${AZURE_CLIENT_ID:-}" && -n "${AZURE_CLIENT_SECRET:-}" && -n "${AZURE_TENANT_ID:-}" ]]; then
+      log "Logging in to Azure with service principal ${AZURE_CLIENT_ID}..."
+      az_login_service_principal
+    else
+      log "Please log in to Azure using a device code..."
+      run_az_interactive login --use-device-code
+    fi
   else
     log "Already logged in to Azure."
+  fi
+
+  if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
+    log "Selecting subscription ${AZURE_SUBSCRIPTION_ID}..."
+    run_az account set --subscription "$AZURE_SUBSCRIPTION_ID"
   fi
 
   # Ensure the resource group exists
@@ -245,13 +304,19 @@ configure_rbac_webhooks() {
   log "Step 6/6 — Configuring K3s API server for Azure RBAC webhooks..."
 
   # Extract the guard webhook configs from the Kubernetes secret
-  sudo mkdir -p /etc/guard
+  # (jsonpath instead of jq: jq is not present on Azure Local SFF nodes)
+  mkdir -p /etc/guard
+  chmod 700 /etc/guard
 
-  kubectl get secrets azure-arc-guard-manifests -n kube-system -o json \
-    | jq -r '.data."guard-authn-webhook.yaml"' | base64 -d > /etc/guard/guard-authn-webhook.yaml
+  kubectl get secret azure-arc-guard-manifests -n kube-system \
+    -o jsonpath='{.data.guard-authn-webhook\.yaml}' | base64 -d > /etc/guard/guard-authn-webhook.yaml
+  kubectl get secret azure-arc-guard-manifests -n kube-system \
+    -o jsonpath='{.data.guard-authz-webhook\.yaml}' | base64 -d > /etc/guard/guard-authz-webhook.yaml
 
-  kubectl get secrets azure-arc-guard-manifests -n kube-system -o json \
-    | jq -r '.data."guard-authz-webhook.yaml"' | base64 -d > /etc/guard/guard-authz-webhook.yaml
+  local f
+  for f in /etc/guard/guard-authn-webhook.yaml /etc/guard/guard-authz-webhook.yaml; do
+    [[ -s "$f" ]] || err "Could not extract $f from secret azure-arc-guard-manifests. Is azure-rbac enabled on the connected cluster?"
+  done
 
   log "Guard webhook configs written to /etc/guard/"
 
@@ -326,21 +391,32 @@ main() {
   echo ""
 
   check_root
+
+  if [[ "$ARC_WEBHOOKS_ONLY" == "true" ]]; then
+    systemctl is-active --quiet k3s || err "ARC_WEBHOOKS_ONLY needs a running K3s server on this node."
+    configure_rbac_webhooks
+    log "Azure RBAC webhooks configured on $(hostname)."
+    return
+  fi
+
   install_k3s
   configure_kubeconfig
   setup_azure_cli
   connect_to_arc
-  enable_azure_rbac
-  configure_rbac_webhooks
+  if [[ "$SKIP_AZURE_RBAC" == "true" ]]; then
+    warn "SKIP_AZURE_RBAC=true - skipping Azure RBAC (steps 5-6)."
+  else
+    enable_azure_rbac
+    configure_rbac_webhooks
+  fi
 
   echo ""
   log "============================================================"
   log "  Setup complete!"
-  log "  Cluster '$CLUSTER_NAME' is connected to Azure Arc with"
-  log "  Azure RBAC enabled."
+  log "  Cluster '$CLUSTER_NAME' is connected to Azure Arc."
   log ""
   log "  Verify with:"
-  log "    run_az connectedk8s show -g $RESOURCE_GROUP -n $CLUSTER_NAME -o table"
+  log "    az connectedk8s show -g $RESOURCE_GROUP -n $CLUSTER_NAME -o table"
   log "    kubectl get pods -n azure-arc"
   log "============================================================"
 }

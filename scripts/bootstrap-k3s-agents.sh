@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # Run on the K3s management / server node (NestedVM-01) with sudo. Installs
 # K3s agents on the other two nested VMs over SSH using the same SELinux RPM
 # skip as setup-k3s-arc.sh / k3s-join-agent.sh.
@@ -15,7 +15,7 @@
 #
 # Optional environment:
 #   K3S_URL              - override API URL shown to agents (default: https://<this host's 192.168.100.x>:6443)
-#   SSH_USER             - default edgeuser
+#   SSH_USER             - default clouduser
 #   SSH_IDENTITY         - default $SUDO_HOME/.ssh/id_rsa or /root/.ssh/id_rsa or $HOME/.ssh/id_rsa
 #   SSH_OPTS             - extra ssh/scp args, e.g. '-o StrictHostKeyChecking=accept-new'
 #   JOIN_SCRIPT          - path to k3s-join-agent.sh (default: beside this script)
@@ -34,13 +34,13 @@
 #   mkdir -p ~/k3s && chmod +x ~/k3s/bootstrap-k3s-agents.sh ~/k3s/k3s-join-agent.sh
 #
 # --- One-time: SSH private key on the management VM (for NestedVM-02 and NestedVM-03) ---
-# bootstrap-k3s-agents.sh connects as SSH_USER (default edgeuser) to each worker IP.
+# bootstrap-k3s-agents.sh connects as SSH_USER (default clouduser) to each worker IP.
 # That user needs key-based SSH. Typical lab approach: reuse the same key pair the
 # Hyper-V host uses with Get-SffNodeVoucher.ps1 if workers already trust it.
 # From the Hyper-V host PowerShell (example paths from README):
 #
-#   scp C:\Users\azureadmin\.ssh\id_rsa edgeuser@<MGMT_IP>:~/.ssh/id_rsa_from_host
-#   ssh edgeuser@<MGMT_IP> "chmod 600 ~/.ssh/id_rsa_from_host"
+#   scp C:\Users\azureadmin\.ssh\id_rsa clouduser@<MGMT_IP>:~/.ssh/id_rsa_from_host
+#   ssh clouduser@<MGMT_IP> "chmod 600 ~/.ssh/id_rsa_from_host"
 #
 # Then on the management VM either merge into ~/.ssh/id_rsa or run bootstrap with:
 #   export SSH_IDENTITY=$HOME/.ssh/id_rsa_from_host
@@ -50,6 +50,9 @@
 # existing key).
 #
 set -euo pipefail
+
+# The K3s installer uses /opt/bin when /usr/local/bin is read-only; sudo may not have either on PATH.
+export PATH="$PATH:/usr/local/bin:/opt/bin"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JOIN_SCRIPT="${JOIN_SCRIPT:-$SCRIPT_DIR/k3s-join-agent.sh}"
