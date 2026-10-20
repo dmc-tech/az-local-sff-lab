@@ -1,62 +1,96 @@
 ================================================================================
-  K3s cluster setup (Azure Local SFF lab)
+  Azure Local SFF lab - from bootstrap loader to K3s cluster
 ================================================================================
 
-Scripts on this Hyper-V host (after provisioning): C:\Scripts\
+Scripts on this Hyper-V host: C:\Scripts\
 
-  Deploy-K3sCluster.ps1     - ONE-COMMAND cluster build from this host (recommended)
+  setup.ps1                 - Phase 1: creates the nested VMs (runs automatically)
+  Get-SffNodeVoucher.ps1    - Phase 2: collects FDO vouchers from the bootstrap loader
+  Deploy-K3sCluster.ps1     - Phase 4: builds the K3s cluster on the deployed nodes
   k3s-node-prep.sh          - Node prep: kernel modules, sysctl, firewall, egress check
   k3s-install-server.sh     - K3s server install (first server, or HA join)
   k3s-join-agent.sh         - Join one worker (agent) to the cluster
-  setup_k3s_arc.sh          - Connect the cluster to Azure Arc (+ Azure RBAC)
+  setup_k3s_arc.sh          - Connect the K3s cluster to Azure Arc (+ Azure RBAC)
   bootstrap-k3s-agents.sh   - Manual alternative: join workers from the server node
-  Get-SffNodeVoucher.ps1    - FDO vouchers during initial install (edgeuser; pre-Arc)
   K3S-CLUSTER-SETUP.txt     - This file
 
-Nested VMs: NestedVM-01 (first server), NestedVM-02 and NestedVM-03.
+Nested VMs: NestedVM-01 (first K3s server), NestedVM-02 and NestedVM-03.
 Network: 192.168.100.0/24 (DHCP 192.168.100.100-200).
+Node login (bootstrap loader and deployed SFF Linux): edgeuser / Password1
+
+Microsoft overview of SFF deployments (ZTP, provisioning):
+  https://learn.microsoft.com/en-us/azure/azure-local/small-form-factor/small-form-factor-overview
 
 --------------------------------------------------------------------------------
-  PREREQUISITES (all nodes - do not skip)
+  THE FOUR PHASES
 --------------------------------------------------------------------------------
 
-  1. setup.ps1 completed (C:\Scripts\setup.log, C:\Scripts\.setup-completed).
-  2. Azure Local provisioning finished on every nested VM and each node is
-     registered and Arc-enabled in Azure (portal workflow).
-  3. The provisioning SSH private key is on this host in C:\Scripts\keys\
+  Phase 1  Hyper-V host + nested VMs ............. automatic (setup.ps1)
+  Phase 2  FDO vouchers from the bootstrap loader . Get-SffNodeVoucher.ps1
+  Phase 3  Azure deploys SFF Linux to each node ... Azure (manual, wait for it)
+  Phase 4  K3s cluster ............................ Deploy-K3sCluster.ps1
 
-SSH after provisioning (not during ISO / FDO install):
-
-  User:     clouduser
-  Auth:     SSH private key generated at provisioning time
-
-That key is downloaded to the Downloads folder of the PC that ran the Azure
-portal provisioning session. Copy it to this host:
-
-  - One key for all nodes:   C:\Scripts\keys\<anything>.pem  (only file there)
-  - One key per node:        C:\Scripts\keys\NestedVM-01.pem, NestedVM-02.pem, ...
-
-clouduser must have passwordless sudo on every node. Do not use edgeuser for
-K3s; it applies to the earlier install/voucher phase only.
+The ISO the nested VMs boot is only a BOOTSTRAP LOADER. The real operating
+system, Small Form Factor Linux, is deployed onto each node by Azure in
+phase 3. Kubernetes can only be installed after that - anything installed on
+the bootstrap loader is replaced by the deployment.
 
 --------------------------------------------------------------------------------
-  AUTOMATED DEPLOYMENT (recommended)
+  PHASE 1 - Hyper-V host and nested VMs (automatic)
+--------------------------------------------------------------------------------
+
+Terraform/Bicep deploys this host; after a reboot setup.ps1 runs on first
+logon. It prepares the data disk, downloads the bootstrap loader ISO, sets up
+NAT + DHCP, and creates and starts NestedVM-01..03 from the ISO.
+
+Check it finished:  C:\Scripts\setup.log ends with "setup.ps1 completed",
+and C:\Scripts\.setup-completed exists.
+
+--------------------------------------------------------------------------------
+  PHASE 2 - Collect FDO vouchers
+--------------------------------------------------------------------------------
+
+When the nodes have booted the bootstrap loader, each one generates an FDO
+ownership voucher. Collect them over SSH (edgeuser / Password1):
+
+  C:\Scripts\Get-SffNodeVoucher.ps1 -Wait -AutoTrustHostKeys
+
+It polls every 60 s (up to 2 hours) and saves each voucher under
+C:\vouchers\<node-ip>\ (plus a copy in C:\vouchers).
+
+--------------------------------------------------------------------------------
+  PHASE 3 - Azure deploys SFF Linux (manual)
+--------------------------------------------------------------------------------
+
+  1. In the Azure portal, provision the Small Form Factor devices using the
+     vouchers from C:\vouchers (one per node), following the Microsoft guide
+     linked above.
+  2. Azure deploys SFF Linux onto each nested VM. The nodes reboot during this.
+  3. WAIT until Azure reports the deployment as complete for EVERY node.
+
+Do not start phase 4 until all nodes show as deployed. Deploy-K3sCluster.ps1
+asks you to confirm this before it touches any node.
+
+--------------------------------------------------------------------------------
+  PHASE 4 - K3s cluster (automated)
 --------------------------------------------------------------------------------
 
 Open PowerShell as Administrator on this host and run:
 
-  C:\Scripts\Deploy-K3sCluster.ps1 -Wait -InstallKubectl
+  C:\Scripts\Deploy-K3sCluster.ps1 -InstallKubectl
 
-What it does (each step is idempotent - safe to re-run after a failure):
+Answer "y" when asked whether Azure finished deploying SFF Linux on all nodes
+(or pass -SffLinuxDeployed for an unattended run). The script then:
 
   1. Finds node IPs from Hyper-V MAC addresses + DHCP leases
-  2. -Wait: polls until the key is in C:\Scripts\keys and every node accepts
-     SSH as clouduser with sudo (start it, then finish provisioning)
-  3. Uploads the Linux scripts to /tmp/k3s-lab on each node over SSH
+  2. Logs in to each node as edgeuser / Password1 (PuTTY plink) and checks sudo
+  3. Uploads the Linux scripts to /tmp/k3s-lab on each node
   4. Runs k3s-node-prep.sh on each node
   5. Installs the K3s server on NestedVM-01, then joins NestedVM-02/03
   6. Waits until all nodes are Ready, labels workers
   7. Saves C:\Scripts\k3s\kubeconfig (and kubectl.exe with -InstallKubectl)
+
+Every step is idempotent - after a failure, fix the cause and run it again.
 
 Then from this host:
 
@@ -65,20 +99,25 @@ Then from this host:
 
 Useful options:
 
+  -SffLinuxDeployed       Skip the confirmation prompt (unattended runs).
+  -Wait                   Poll until every node accepts SSH (e.g. while nodes
+                          finish rebooting after the deployment).
   -Topology HA            All three nodes are servers (embedded etcd); survives
                           the loss of any one node. Default ServerAgents is
                           1 server (NestedVM-01) + 2 agents.
   -K3sVersion v1.33.5+k3s1  Pin a K3s release (default: stable channel).
-  -SshKeyPath <file>      Use a specific key for every node.
+  -SshUser / -SshPassword Override the node login (default edgeuser / Password1).
+  -AuthMode Key -SshKeyPath <file>   Use an SSH key instead of the password.
   -NodeIPs a,b,c          Skip discovery; first IP becomes the first server.
 
 Logs and state: C:\Scripts\k3s\deploy-k3s.log, C:\Scripts\k3s\cluster.json
 
 --------------------------------------------------------------------------------
-  AZURE ARC (optional)
+  OPTIONAL - Connect the K3s cluster to Azure Arc
 --------------------------------------------------------------------------------
 
-Add -EnableArc to connect the cluster to Azure Arc with Azure RBAC.
+The nodes are already registered with Azure by phase 3. This adds the K3s
+cluster itself as an Arc-enabled Kubernetes resource, with Azure RBAC.
 
 Interactive (a device code is shown in the console):
 
@@ -89,27 +128,23 @@ Unattended (service principal; needs Contributor on the resource group, and
 User Access Administrator or Owner when Azure RBAC is enabled):
 
   $sp = Get-Credential    # user name = appId, password = client secret
-  C:\Scripts\Deploy-K3sCluster.ps1 -EnableArc -ArcServicePrincipal $sp `
+  C:\Scripts\Deploy-K3sCluster.ps1 -SffLinuxDeployed -EnableArc -ArcServicePrincipal $sp `
       -ArcTenantId <tenant-id> -ArcSubscriptionId <subscription-id> `
       -ArcResourceGroup rg-arc-k3s -ArcLocation uksouth
 
   -SkipAzureRbac connects to Arc without configuring Azure RBAC webhooks.
   With -Topology HA the RBAC webhooks are applied to all three servers.
 
-Secrets (cluster token, client secret) are sent over SSH stdin into mode-600
-files under /tmp/k3s-lab and removed afterwards; they are never put on a
-command line or written to the log.
-
 --------------------------------------------------------------------------------
-  MANUAL DEPLOYMENT (alternative)
+  MANUAL PHASE 4 (alternative)
 --------------------------------------------------------------------------------
 
-From this host (PowerShell; ssh/scp are built into Windows Server 2025):
+From this host, copy the scripts to each node (password: Password1):
 
-  $key = 'C:\Scripts\keys\NestedVM-01.pem'
-  scp -i $key C:\Scripts\k3s-node-prep.sh C:\Scripts\k3s-install-server.sh `
-      C:\Scripts\k3s-join-agent.sh C:\Scripts\setup_k3s_arc.sh clouduser@<MGMT_IP>:~/
-  # repeat the scp for each worker IP (k3s-node-prep.sh and k3s-join-agent.sh)
+  pscp C:\Scripts\k3s-node-prep.sh C:\Scripts\k3s-install-server.sh `
+       C:\Scripts\k3s-join-agent.sh C:\Scripts\setup_k3s_arc.sh edgeuser@<NODE_IP>:
+
+Then SSH to each node (plink edgeuser@<NODE_IP> or ssh edgeuser@<NODE_IP>).
 
 On every node:
 
@@ -133,9 +168,6 @@ Verify on the first server:
 
   sudo k3s kubectl get nodes -o wide
 
-bootstrap-k3s-agents.sh is still available to join workers from the server
-node over SSH (see the comments at the top of that script).
-
 --------------------------------------------------------------------------------
   TROUBLESHOOTING
 --------------------------------------------------------------------------------
@@ -145,13 +177,17 @@ node over SSH (see the comments at the top of that script).
   Microsoft.Compute.CustomScriptExtension\. Note: re-running the extension
   reboots this host.
 
-- "SSH not reachable or key rejected": provisioning not finished, wrong key,
-  or wrong user. Test: ssh -i C:\Scripts\keys\<key> clouduser@<IP> hostname
+- No vouchers (phase 2): the nodes must have booted the ISO and be reachable
+  on SSH; see C:\vouchers\voucher-retrieval.log.
 
-- "Host key verification failed" after re-provisioning a node: delete
-  C:\Scripts\k3s\known_hosts and re-run.
+- Deploy-K3sCluster.ps1 stops at the confirmation: finish phase 3 in Azure
+  first, then answer "y" (or pass -SffLinuxDeployed).
 
-- "no passwordless sudo": give clouduser NOPASSWD sudo on that node.
+- "SSH as edgeuser not possible yet": the node is rebooting or not reachable.
+  Test: plink -ssh edgeuser@<IP> -pw Password1 hostname. Use -Wait to poll.
+
+- "cannot sudo with the supplied password": check -SshPassword, or that
+  edgeuser is allowed to sudo on that node.
 
 - Node prep fails egress check: nodes need outbound HTTPS to get.k3s.io,
   update.k3s.io and github.com through the host NAT.

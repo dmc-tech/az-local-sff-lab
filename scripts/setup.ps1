@@ -22,7 +22,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.3.0"
+$ScriptVersion = "1.3.1"
 $LogFile       = "C:\Scripts\setup.log"
 $CompletedFlag = "C:\Scripts\.setup-completed"
 # Data-disk paths ($VHDRoot, $VMRoot, $OSImageDir, ...) are set by Set-DataPaths
@@ -1078,6 +1078,15 @@ try {
     Get-Date -Format "yyyy-MM-dd HH:mm:ss" | Out-File -FilePath $CompletedFlag -Force
     Write-Log "Completion flag written to $CompletedFlag"
     Write-Log "========== setup.ps1 completed =========="
+
+    Write-Host ""
+    Write-Host "Next steps (full guide: C:\Scripts\K3S-CLUSTER-SETUP.txt):" -ForegroundColor Cyan
+    Write-Host "  Phase 2  Collect FDO vouchers from the bootstrap loader (edgeuser / Password1):" -ForegroundColor White
+    Write-Host "             C:\Scripts\Get-SffNodeVoucher.ps1 -Wait -AutoTrustHostKeys" -ForegroundColor White
+    Write-Host "  Phase 3  In Azure, use the vouchers in C:\vouchers to deploy SFF Linux to each node;" -ForegroundColor White
+    Write-Host "           wait until Azure reports the deployment complete for every node." -ForegroundColor White
+    Write-Host "  Phase 4  Install K3s on the deployed nodes:" -ForegroundColor White
+    Write-Host "             C:\Scripts\Deploy-K3sCluster.ps1 -InstallKubectl" -ForegroundColor White
 
    # Write-Log "--- Starting voucher retrieval (polling mode) in new window ---"
    # Start-Process powershell.exe -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-File", "C:\Scripts\Get-SffNodeVoucher.ps1", "-Wait"

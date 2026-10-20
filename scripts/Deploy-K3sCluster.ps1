@@ -1,15 +1,24 @@
 <#
 .SYNOPSIS
     Deploys a K3s Kubernetes cluster across the Azure Local SFF nested VMs from
-    the Hyper-V host, end to end, with one command.
+    the Hyper-V host - the last phase of the lab lifecycle.
 
 .DESCRIPTION
-    Runs on the Hyper-V host (Azure VM) after the nested VMs have been
-    provisioned and Arc-enabled through the Azure portal. It:
+    Lab lifecycle (see C:\Scripts\K3S-CLUSTER-SETUP.txt):
+
+      Phase 1  setup.ps1 creates the nested VMs, which boot the SFF bootstrap
+               loader ISO (SSH: edgeuser / Password1).
+      Phase 2  Get-SffNodeVoucher.ps1 collects the FDO vouchers from the loader.
+      Phase 3  In Azure, the vouchers are used to deploy Small Form Factor Linux
+               onto each node. Wait until Azure reports deployment complete.
+      Phase 4  THIS SCRIPT installs K3s on the deployed SFF Linux nodes.
+
+    Running K3s against the bootstrap loader would be wasted (the loader is
+    replaced by phase 3), so the script asks you to confirm phase 3 finished,
+    or takes -SffLinuxDeployed for unattended runs. It then:
 
       1. Discovers the nested VM IPs (Hyper-V MAC -> DHCP lease), or uses -NodeIPs
-      2. Waits (with -Wait) until every node accepts SSH as clouduser with
-         passwordless sudo, i.e. provisioning has finished
+      2. Waits (with -Wait) until every node accepts SSH and sudo
       3. Uploads the Linux scripts to /tmp/k3s-lab on every node over SSH
       4. Runs k3s-node-prep.sh on every node (kernel modules, sysctl, firewall, egress)
       5. Installs the first K3s server on the first node (NestedVM-01)
@@ -23,21 +32,27 @@
 
     Every step is idempotent: re-running skips nodes that already run K3s.
     Secrets (cluster token, service principal secret) are sent to the nodes
-    over SSH stdin into mode-600 files that are deleted afterwards, never on a
-    command line.
+    over SSH stdin into mode-600 files that are deleted afterwards.
+
+.PARAMETER SffLinuxDeployed
+    Confirms Azure has finished deploying SFF Linux on every node (phase 3).
+    Without it the script asks interactively.
+
+.PARAMETER AuthMode
+    Password (default): log in as -SshUser with -SshPassword using PuTTY plink
+    (installed by setup.ps1). Key: OpenSSH ssh.exe with -SshKeyPath, or keys
+    in -SshKeyDirectory named <VMName>.pem / <IP>.pem / the only file there.
+
+.PARAMETER SshUser
+    Default edgeuser.
+
+.PARAMETER SshPassword
+    Default Password1 (the lab's hard-coded node password). Also used for sudo
+    when the user does not have passwordless sudo.
 
 .PARAMETER NodeIPs
     Node IPs in role order (first = initial server). When omitted, nodes are
     discovered from Hyper-V VMs named <NestedVmPrefix>-* and the DHCP scope.
-
-.PARAMETER SshKeyPath
-    Private key used for every node. When omitted, each node uses
-    <SshKeyDirectory>\<VMName>.pem (or <IP>.pem), or the only key file in that
-    directory.
-
-.PARAMETER SshKeyDirectory
-    Folder holding the provisioning key(s) downloaded from the Azure portal.
-    Default C:\Scripts\keys.
 
 .PARAMETER Topology
     ServerAgents (default): one server + agents, matching NestedVM-01 as the
@@ -45,48 +60,54 @@
     odd node count, so 3 for this lab).
 
 .PARAMETER Wait
-    Poll until nodes are discovered, keys are present and SSH works, up to
-    -TimeoutMinutes. Start it right after provisioning and walk away.
+    Poll until nodes are discovered and SSH works, up to -TimeoutMinutes.
+    Useful while nodes reboot at the end of the SFF Linux deployment.
 
 .PARAMETER EnableArc
-    Connect the cluster to Azure Arc after it is built. For unattended runs pass
-    -ArcServicePrincipal (user name = appId, password = secret) and
+    Connect the K3s cluster to Azure Arc after it is built. For unattended runs
+    pass -ArcServicePrincipal (user name = appId, password = secret) and
     -ArcTenantId, or set AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID
     in the environment. Otherwise a device code is shown in this console.
 
 .EXAMPLE
-    C:\Scripts\Deploy-K3sCluster.ps1 -Wait
+    C:\Scripts\Deploy-K3sCluster.ps1 -InstallKubectl
 
-    Waits for the three nodes and the key in C:\Scripts\keys, then builds a
-    1 server + 2 agent cluster.
+    Asks you to confirm SFF Linux is deployed, then builds a 1 server + 2 agent
+    cluster as edgeuser / Password1 and installs kubectl on the host.
 
 .EXAMPLE
-    C:\Scripts\Deploy-K3sCluster.ps1 -Topology HA -InstallKubectl
+    C:\Scripts\Deploy-K3sCluster.ps1 -SffLinuxDeployed -Topology HA -Wait
 
-    Builds a three-server HA cluster and installs kubectl on the host.
+    Unattended: waits for SSH on all nodes, then builds a three-server HA cluster.
 
 .EXAMPLE
     $sp = Get-Credential   # appId / client secret
-    C:\Scripts\Deploy-K3sCluster.ps1 -EnableArc -ArcServicePrincipal $sp -ArcTenantId <tenant> `
-        -ArcSubscriptionId <sub> -ArcResourceGroup rg-arc-k3s -ArcLocation uksouth
+    C:\Scripts\Deploy-K3sCluster.ps1 -SffLinuxDeployed -EnableArc -ArcServicePrincipal $sp `
+        -ArcTenantId <tenant> -ArcSubscriptionId <sub> -ArcResourceGroup rg-arc-k3s -ArcLocation uksouth
 
     Builds the cluster and connects it to Azure Arc unattended.
 
 .NOTES
-    Requires the OpenSSH client (built into Windows Server 2025; installed
-    automatically if missing). Logs to <OutputPath>\deploy-k3s.log.
+    Password mode needs PuTTY plink.exe (installed by setup.ps1). Key mode needs
+    the OpenSSH client (built into Windows Server 2025). Logs to
+    <OutputPath>\deploy-k3s.log.
 #>
 
 #Requires -RunAsAdministrator
 
 [CmdletBinding()]
 param(
+    [switch]$SffLinuxDeployed,
+
     [string[]]$NodeIPs,
     [string]$NestedVmPrefix = "NestedVM",
     [string]$DhcpScopeId = "192.168.100.0",
     [string]$NodeCidr = "192.168.100.0/24",
 
-    [string]$SshUser = "clouduser",
+    [ValidateSet("Password", "Key")]
+    [string]$AuthMode = "Password",
+    [string]$SshUser = "edgeuser",
+    [string]$SshPassword = "Password1",
     [string]$SshKeyPath,
     [string]$SshKeyDirectory = "C:\Scripts\keys",
 
@@ -116,7 +137,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.0.0"
+$ScriptVersion = "1.1.0"
 $RemoteDir = "/tmp/k3s-lab"
 # Text piped to ssh.exe is base64 (see Send-RemoteText), so ASCII is all that is needed.
 $OutputEncoding = [System.Text.Encoding]::ASCII
@@ -164,8 +185,17 @@ function Write-LfFile {
 }
 
 # ---------------------------------------------------------------------------
-# OpenSSH client
+# SSH clients: PuTTY plink for password auth (Windows OpenSSH cannot take a
+# password non-interactively), OpenSSH ssh.exe for key auth.
 # ---------------------------------------------------------------------------
+function Resolve-PlinkExe {
+    $cmd = Get-Command "plink.exe" -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Path) { return $cmd.Path }
+    $fallback = "C:\Program Files\PuTTY\plink.exe"
+    if (Test-Path $fallback) { return $fallback }
+    throw "plink.exe not found. setup.ps1 installs PuTTY; install it or use -AuthMode Key."
+}
+
 function Resolve-SshExe {
     $cmd = Get-Command "ssh.exe" -ErrorAction SilentlyContinue
     if ($cmd -and $cmd.Path) { return $cmd.Path }
@@ -223,8 +253,26 @@ function Invoke-Native {
     return [pscustomobject]@{ ExitCode = $code; Output = ($lines -join "`n").Trim(); Lines = $lines }
 }
 
-function Get-SshArgs {
+# Host key fingerprint for plink -hostkey (trust on first use per run).
+# plink -batch refuses unknown host keys, and the key changes when Azure
+# replaces the bootstrap loader with SFF Linux, so it is looked up each run.
+function Get-PlinkHostKey {
+    param($Node)
+    $r = Invoke-Native -FilePath $script:PlinkExe -Arguments @("-ssh", "-batch", "-l", $SshUser, $Node.IP, "exit") -Quiet
+    $m = [regex]::Match($r.Output, "SHA256:[A-Za-z0-9+/=]+")
+    if ($m.Success) { return $m.Value }
+    return $null   # already cached in PuTTY's registry, or host unreachable
+}
+
+function Get-RemoteArgs {
     param($Node, [switch]$Tty, [switch]$NoStdin)
+    if ($AuthMode -eq "Password") {
+        $a = @("-ssh", "-batch", "-no-antispoof", "-l", $SshUser, "-pw", $SshPassword)
+        if ($Node.HostKey) { $a += @("-hostkey", $Node.HostKey) }
+        if ($Tty) { $a += "-t" } else { $a += "-T" }
+        $a += $Node.IP
+        return $a
+    }
     $sshArgs = @(
         "-i", $Node.KeyPath,
         "-o", "BatchMode=yes",
@@ -240,6 +288,19 @@ function Get-SshArgs {
     return $sshArgs
 }
 
+# When the SSH user needs a password for sudo, feed it to sudo -S. For
+# interactive (tty) commands the credential is cached with sudo -v first so the
+# real command keeps the terminal as stdin.
+function Add-SudoPassword {
+    param($Node, [string]$Command, [switch]$Interactive)
+    if (-not $Node.SudoNeedsPassword -or -not $Command.StartsWith("sudo ")) { return $Command }
+    $feed = "printf '%s\n' $(ConvertTo-ShellLiteral $SshPassword)"
+    if ($Interactive) {
+        return "$feed | sudo -S -p '' -v && $Command"
+    }
+    return "$feed | sudo -S -p '' " + $Command.Substring(5)
+}
+
 function Invoke-Remote {
     param(
         $Node,
@@ -251,15 +312,19 @@ function Invoke-Remote {
     )
     $hasInput = $PSBoundParameters.ContainsKey("InputText")
     $noStdin = -not $hasInput -and -not $Interactive
+    $remoteCommand = Add-SudoPassword -Node $Node -Command $Command -Interactive:$Interactive
+    $exe = $script:SshExe
+    if ($AuthMode -eq "Password") { $exe = $script:PlinkExe }
     $params = @{
-        FilePath    = $script:SshExe
-        Arguments   = @(Get-SshArgs -Node $Node -Tty:$Interactive -NoStdin:$noStdin) + @($Command)
+        FilePath    = $exe
+        Arguments   = @(Get-RemoteArgs -Node $Node -Tty:$Interactive -NoStdin:$noStdin) + @($remoteCommand)
         Quiet       = $Quiet
         Interactive = $Interactive
     }
     if ($hasInput) { $params.InputText = $InputText }
     $result = Invoke-Native @params
     if ($result.ExitCode -ne 0 -and -not $AllowFailure) {
+        # Log the caller's command, not the one carrying the sudo password.
         throw "Command failed on $($Node.Name) ($($Node.IP)) with exit code $($result.ExitCode): $Command"
     }
     return $result
@@ -309,9 +374,24 @@ function Normalize-MacAddress {
     return (($Mac -replace "[-:\.]", "").ToUpperInvariant())
 }
 
+function New-NodeObject {
+    param([string]$Name, [string]$IP)
+    return [pscustomobject]@{
+        Name              = $Name
+        IP                = $IP
+        KeyPath           = $null
+        HostKey           = $null
+        SudoNeedsPassword = $false
+        Ready             = $false
+        HostName          = $null
+        NodeName          = $null
+        Role              = $null
+    }
+}
+
 function Get-ClusterNodes {
     if ($NodeIPs) {
-        return @($NodeIPs | ForEach-Object { [pscustomobject]@{ Name = $_; IP = $_; KeyPath = $null; HostName = $null; NodeName = $null; Role = $null } })
+        return @($NodeIPs | ForEach-Object { New-NodeObject -Name $_ -IP $_ })
     }
 
     $vms = @(Get-VM -ErrorAction Stop | Where-Object { $_.Name -like "$NestedVmPrefix-*" } | Sort-Object Name)
@@ -334,19 +414,12 @@ function Get-ClusterNodes {
         if (-not $lease) {
             throw "No active DHCP lease in scope $DhcpScopeId for $($vm.Name) (MAC $mac)."
         }
-        $nodes += [pscustomobject]@{
-            Name     = $vm.Name
-            IP       = $lease.IPAddress.IPAddressToString
-            KeyPath  = $null
-            HostName = $null
-            NodeName = $null
-            Role     = $null
-        }
+        $nodes += New-NodeObject -Name $vm.Name -IP $lease.IPAddress.IPAddressToString
     }
     return $nodes
 }
 
-# Copies the portal-downloaded key to a private, LF-normalised cache file.
+# Key mode: copies the node's private key to a private, LF-normalised cache file.
 function Resolve-NodeKey {
     param($Node)
     $source = $null
@@ -363,7 +436,7 @@ function Resolve-NodeKey {
         }
     }
     if (-not $source -or -not (Test-Path $source -PathType Leaf)) {
-        throw "No SSH key for $($Node.Name). Put the portal key in $SshKeyDirectory (as $($Node.Name).pem, or a single key for all nodes) or pass -SshKeyPath."
+        throw "No SSH key for $($Node.Name). Put the key in $SshKeyDirectory (as $($Node.Name).pem, or a single key for all nodes), pass -SshKeyPath, or use -AuthMode Password."
     }
 
     if (-not (Test-Path $KeyCacheDir)) {
@@ -375,17 +448,33 @@ function Resolve-NodeKey {
     return $dest
 }
 
-# Returns $null when ready, otherwise a reason string.
+# Returns $null when ready, otherwise a reason string. Also records the
+# hostname and whether sudo needs the SSH password.
 function Test-NodeReady {
     param($Node)
-    $r = Invoke-Remote -Node $Node -Command "hostname; sudo -n true && echo SUDO_OK" -Quiet -AllowFailure
-    if ($r.ExitCode -eq 255) { return "SSH not reachable or key rejected: $($r.Output)" }
-    if ($r.Output -notmatch "SUDO_OK") {
-        throw "$($Node.Name): SSH works but '$SshUser' has no passwordless sudo. Grant NOPASSWD sudo and re-run."
+    if ($AuthMode -eq "Password") {
+        $Node.HostKey = Get-PlinkHostKey -Node $Node
     }
-    $name = $r.Lines | Where-Object { $_ -and $_ -ne "SUDO_OK" } | Select-Object -First 1
+    # Always exits 0 once logged in, so a non-zero code means SSH itself failed.
+    $r = Invoke-Remote -Node $Node -Command "hostname; if sudo -n true 2>/dev/null; then echo SUDO_OK; else echo SUDO_PW; fi" -Quiet -AllowFailure
+    if ($r.ExitCode -ne 0) {
+        $detail = ($r.Lines | Where-Object { $_ } | Select-Object -Last 1)
+        return "SSH as $SshUser not possible yet ($detail)"
+    }
+    if ($r.Output -match "SUDO_PW") {
+        if ($AuthMode -ne "Password") {
+            throw "$($Node.Name): SSH works but '$SshUser' has no passwordless sudo. Use -AuthMode Password (sudo with -SshPassword) or grant NOPASSWD sudo."
+        }
+        $Node.SudoNeedsPassword = $true
+        $check = Invoke-Remote -Node $Node -Command "sudo true && echo SUDO_OK" -Quiet -AllowFailure
+        if ($check.Output -notmatch "SUDO_OK") {
+            throw "$($Node.Name): '$SshUser' cannot sudo with the supplied password. Check -SshPassword or the node's sudoers."
+        }
+    }
+    $name = $r.Lines | Where-Object { $_ -and $_ -notmatch "^SUDO_(OK|PW)$" } | Select-Object -Last 1
     if (-not $name) { $name = $Node.Name }
     $Node.HostName = "$name".Trim().ToLowerInvariant()
+    $Node.Ready = $true
     return $null
 }
 
@@ -400,16 +489,16 @@ function Wait-ForNodes {
             $nodes = @(Get-ClusterNodes)
             foreach ($n in $nodes) {
                 try {
-                    $n.KeyPath = Resolve-NodeKey -Node $n
+                    if ($AuthMode -eq "Key") { $n.KeyPath = Resolve-NodeKey -Node $n }
                     $reason = Test-NodeReady -Node $n
                     if ($reason) { $problems += "$($n.Name) ($($n.IP)): $reason" }
                 } catch {
-                    if ($_.Exception.Message -match "passwordless sudo") { throw }
+                    if ($_.Exception.Message -match "sudo") { throw }
                     $problems += "$($n.Name): $($_.Exception.Message)"
                 }
             }
         } catch {
-            if ($_.Exception.Message -match "passwordless sudo") { throw }
+            if ($_.Exception.Message -match "sudo") { throw }
             $problems += $_.Exception.Message
         }
 
@@ -583,17 +672,52 @@ function Invoke-ArcOnboarding {
 }
 
 # ---------------------------------------------------------------------------
+# Phase gate: K3s goes on the deployed SFF Linux, never on the bootstrap loader
+# ---------------------------------------------------------------------------
+function Confirm-SffLinuxDeployed {
+    if ($SffLinuxDeployed) {
+        Write-Status "-SffLinuxDeployed given: Azure has deployed SFF Linux on all nodes (phase 3 complete)."
+        return
+    }
+    Write-Host ""
+    Write-Host "K3s must be installed on the SFF Linux that Azure deploys, NOT on the bootstrap loader." -ForegroundColor Yellow
+    Write-Host "Before continuing, make sure that:" -ForegroundColor Yellow
+    Write-Host "  1. setup.ps1 completed and the nodes booted the bootstrap loader" -ForegroundColor Yellow
+    Write-Host "  2. Get-SffNodeVoucher.ps1 retrieved a voucher for every node (C:\vouchers)" -ForegroundColor Yellow
+    Write-Host "  3. Azure has finished deploying SFF Linux on every node (check the portal)" -ForegroundColor Yellow
+    Write-Host ""
+    if (-not [Environment]::UserInteractive -or $Host.Name -ne "ConsoleHost") {
+        throw "SFF Linux deployment not confirmed. Re-run with -SffLinuxDeployed once Azure has finished deploying all nodes."
+    }
+    $answer = Read-Host "Has Azure finished deploying SFF Linux on ALL nodes? (y/N)"
+    if ($answer -notmatch "^(y|yes)$") {
+        throw "Stopped: finish the SFF Linux deployment in Azure first (see C:\Scripts\K3S-CLUSTER-SETUP.txt), then re-run."
+    }
+    Write-Status "Operator confirmed SFF Linux is deployed on all nodes."
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 $nodes = @()
 try {
     Write-Step "K3s cluster deployment started (topology: $Topology)"
-    $script:SshExe = Resolve-SshExe
-    Write-Status "Using OpenSSH client: $script:SshExe"
+    Confirm-SffLinuxDeployed
+
+    if ($AuthMode -eq "Password") {
+        $script:PlinkExe = Resolve-PlinkExe
+        Write-Status "Auth: password for '$SshUser' via $script:PlinkExe"
+        if ($SshPassword.Contains('"')) {
+            throw "-SshPassword cannot contain a double quote (Windows PowerShell 5.1 cannot pass it to plink safely)."
+        }
+    } else {
+        $script:SshExe = Resolve-SshExe
+        Write-Status "Auth: SSH key for '$SshUser' via $script:SshExe"
+    }
 
     $scripts = Get-StagedScripts
 
-    Write-Step "Waiting for nodes (SSH as $SshUser with passwordless sudo)"
+    Write-Step "Waiting for nodes (SSH as $SshUser, sudo)"
     $nodes = @(Wait-ForNodes)
     if ($Topology -eq "HA" -and ($nodes.Count -lt 3 -or $nodes.Count % 2 -eq 0)) {
         throw "Topology HA needs an odd number of nodes (3+); found $($nodes.Count). Use -Topology ServerAgents."
@@ -746,7 +870,11 @@ try {
         Write-Host "  kubectl get nodes -o wide        (re-run with -InstallKubectl to get kubectl.exe)" -ForegroundColor White
     }
     Write-Host "Or on the server node:" -ForegroundColor Cyan
-    Write-Host "  ssh -i $($server.KeyPath) $SshUser@$($server.IP) sudo k3s kubectl get nodes" -ForegroundColor White
+    if ($AuthMode -eq "Password") {
+        Write-Host "  plink -ssh $SshUser@$($server.IP) sudo k3s kubectl get nodes   (password: -SshPassword)" -ForegroundColor White
+    } else {
+        Write-Host "  ssh -i $($server.KeyPath) $SshUser@$($server.IP) sudo k3s kubectl get nodes" -ForegroundColor White
+    }
     Write-Host "Log: $LogFile" -ForegroundColor Cyan
 }
 catch {
@@ -758,9 +886,9 @@ catch {
 }
 finally {
     # Best effort: make sure no secret-bearing env files are left on the nodes.
-    if ($script:SshExe) {
+    if ($script:SshExe -or $script:PlinkExe) {
         foreach ($n in $nodes) {
-            if ($n.KeyPath) {
+            if ($n.Ready) {
                 $null = Invoke-Remote -Node $n -Command "rm -f $RemoteDir/k3s.env $RemoteDir/arc.env" -Quiet -AllowFailure
             }
         }

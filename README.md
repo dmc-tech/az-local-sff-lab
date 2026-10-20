@@ -118,20 +118,21 @@ Deploy from the repository root after creating a resource group. Copy [`main.bic
 
 ## After deployment (both methods)
 
-1. **Retrieve vouchers.** The voucher script can poll automatically — start it right after `setup.ps1` finishes and it will wait for each node to produce its FDO PEM file:
+1. **Retrieve vouchers.** The nested VMs boot the bootstrap loader, which generates an FDO voucher on each node. The voucher script can poll automatically. Start it right after `setup.ps1` finishes and it will wait for each node to produce its FDO PEM file, logging in as `edgeuser` / `Password1` (the defaults):
 
 ```powershell
-# Automated polling (checks every 60s, up to 2 hours, using SSH key auth)
+# Automated polling (checks every 60s, up to 2 hours, password auth, trusts host keys on first use)
+C:\Scripts\Get-SffNodeVoucher.ps1 -Wait -AutoTrustHostKeys
+```
+
+Or customise the interval and timeout, or use an SSH key instead of the password:
+
+```powershell
+C:\Scripts\Get-SffNodeVoucher.ps1 -Wait -AutoTrustHostKeys -PollIntervalSeconds 30 -TimeoutMinutes 90
 C:\Scripts\Get-SffNodeVoucher.ps1 -Wait -SshKeyPath C:\Users\azureadmin\.ssh\id_rsa
 ```
 
-Or customise the interval and timeout:
-
-```powershell
-C:\Scripts\Get-SffNodeVoucher.ps1 -Wait -SshKeyPath C:\Users\azureadmin\.ssh\id_rsa -PollIntervalSeconds 30 -TimeoutMinutes 90
-```
-
-One-shot mode is also available (will prompt for SSH passwords):
+One-shot mode is also available:
 
 ```powershell
 C:\Scripts\Get-SffNodeVoucher.ps1
@@ -145,13 +146,20 @@ ssh-keygen -t rsa -N '""' -f C:\Users\azureadmin\.ssh\id_rsa
 # Then distribute the public key to each node once SSH is available
 ```
 
-2. **K3s cluster (automated).** Once the nested VMs are **provisioned and Arc-enabled** in the portal, copy the `clouduser` private key that the portal provisioning flow downloaded into **`C:\Scripts\keys\`** on the Hyper-V host, then run one command from an elevated PowerShell:
+2. **Deploy SFF Linux from Azure.** The ISO the nested VMs boot is only a **bootstrap loader**. Use the vouchers from step 1 to provision the Small Form Factor devices in Azure ([Microsoft overview](https://learn.microsoft.com/en-us/azure/azure-local/small-form-factor/small-form-factor-overview)). Azure then deploys **SFF Linux** onto each node. Wait until Azure reports the deployment as complete for **every** node before you go on.
+
+3. **K3s cluster (automated).** Once SFF Linux is deployed on all nodes, run one command from an elevated PowerShell on the Hyper-V host:
 
 ```powershell
-C:\Scripts\Deploy-K3sCluster.ps1 -Wait -InstallKubectl
+C:\Scripts\Deploy-K3sCluster.ps1 -InstallKubectl
 ```
 
-   The script discovers the node IPs, waits until every node accepts SSH, prepares the nodes, installs the K3s server on `NestedVM-01`, joins the others, waits for all nodes to be `Ready`, and writes a kubeconfig to `C:\Scripts\k3s\kubeconfig`. It is idempotent, so you can safely re-run it after a failure.
+   The script first asks you to confirm that the SFF Linux deployment finished (pass `-SffLinuxDeployed` for unattended runs), because K3s installed on the bootstrap loader would be wiped by the deployment. It then:
+   - discovers the node IPs and logs in as `edgeuser` / `Password1` with PuTTY `plink` (installed by `setup.ps1`)
+   - prepares the nodes, installs the K3s server on `NestedVM-01` and joins the others
+   - waits for all nodes to be `Ready` and writes a kubeconfig to `C:\Scripts\k3s\kubeconfig`
+
+   It is idempotent, so you can safely re-run it after a failure.
 
 ```powershell
 $env:KUBECONFIG = 'C:\Scripts\k3s\kubeconfig'
@@ -163,9 +171,11 @@ C:\Scripts\k3s\bin\kubectl.exe get nodes -o wide
 | `-Topology HA` | All three nodes run as servers with embedded etcd, so the cluster survives the loss of any one node (default `ServerAgents`: 1 server + 2 agents) |
 | `-K3sVersion v1.33.5+k3s1` | Pin a K3s release (default: stable channel) |
 | `-EnableArc` | Connect the cluster to Azure Arc with Azure RBAC; add `-ArcServicePrincipal`/`-ArcTenantId` for unattended login, otherwise a device code is shown |
-| `-SshKeyPath` / `-NodeIPs` | Override key discovery / node discovery |
+| `-Wait` | Poll until every node accepts SSH (e.g. while nodes reboot after the deployment) |
+| `-SshUser` / `-SshPassword` / `-AuthMode Key -SshKeyPath` | Override the node login (default `edgeuser` / `Password1`) |
+| `-NodeIPs` | Skip node discovery; the first IP becomes the first server |
 
-   Full instructions, the manual fallback, and troubleshooting are in **`C:\Scripts\K3S-CLUSTER-SETUP.txt`** ([source](scripts/K3S-CLUSTER-SETUP.txt)). Requirements: `clouduser` needs passwordless sudo, and the nodes need outbound HTTPS to `get.k3s.io` and `github.com`.
+   The full four-phase walkthrough (bootstrap loader, vouchers, Azure deployment, K3s), the manual fallback, and troubleshooting are in **`C:\Scripts\K3S-CLUSTER-SETUP.txt`** ([source](scripts/K3S-CLUSTER-SETUP.txt)). The nodes need outbound HTTPS to `get.k3s.io` and `github.com`.
 
    If `C:\Scripts` is missing files after you changed the repo, run **`terraform apply`** again so the Custom Script Extension re-runs (the extension timestamp changes when script content changes; the re-run reboots the host). For Bicep, also rebuild `main.json` (`az bicep build --file main.bicep`) if you deploy from the JSON. Check extension status under the VM → **Extensions** in the Azure portal, or logs under `C:\WindowsAzure\Logs\Plugins\Microsoft.Compute.CustomScriptExtension\`.
 
