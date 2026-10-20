@@ -22,11 +22,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.2.0"
+$ScriptVersion = "1.3.2"
 $LogFile       = "C:\Scripts\setup.log"
 $CompletedFlag = "C:\Scripts\.setup-completed"
-$VHDRoot       = "F:\Hyper-V\Virtual Hard Disks"  # Data disk (formatted separately)
-$VMRoot   = "F:\Hyper-V"
+# Data-disk paths ($VHDRoot, $VMRoot, $OSImageDir, ...) are set by Set-DataPaths
+# once Initialize-DataDisk has found the data volume's drive letter.
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -54,20 +54,28 @@ $VMMemory = 16GB
 $VMCPUs   = 8
 
 $OSImageUrl  = $OsImagePackageUrl
-$OSImageDir  = "F:\Hyper-V\Images"
-$OSImageZipPath = "$OSImageDir\InstallerPackage.zip"
-$OSImageExtractDir = "$OSImageDir\extracted"
-$OSImagePath = "$OSImageDir\InstallOS.iso"
-$DotNetRuntimeInstallerPath = "$OSImageDir\windowsdesktop-runtime-9.0.14-win-x64.exe"
 $configuratorLeaf = [System.IO.Path]::GetFileName(([Uri]$ConfiguratorAppUrl).LocalPath)
 if ([string]::IsNullOrWhiteSpace($configuratorLeaf)) {
     $configuratorLeaf = "ConfiguratorAppInstaller"
 }
-# Use Path::Combine, not Join-Path: Join-Path resolves F: and fails before Initialize-DataDisk creates the volume.
-$ConfiguratorInstallerPath = [System.IO.Path]::Combine($OSImageDir, $configuratorLeaf)
 # Version-less filename follows /latest/ redirects to the current PuTTY release.
 $PuttyInstallerUrl = "https://the.earth.li/~sgtatham/putty/latest/w64/putty-64bit-installer.msi"
-$PuttyInstallerPath = "$OSImageDir\putty-64bit-installer.msi"
+
+# Sets every path that lives on the data volume, for whatever letter it has.
+function Set-DataPaths {
+    param([string]$DriveLetter)
+    $root = "${DriveLetter}:\Hyper-V"
+    $script:VMRoot                     = $root
+    $script:VHDRoot                    = "$root\Virtual Hard Disks"
+    $script:OSImageDir                 = "$root\Images"
+    $script:OSImageZipPath             = "$script:OSImageDir\InstallerPackage.zip"
+    $script:OSImageExtractDir          = "$script:OSImageDir\extracted"
+    $script:OSImagePath                = "$script:OSImageDir\InstallOS.iso"
+    $script:DotNetRuntimeInstallerPath = "$script:OSImageDir\windowsdesktop-runtime-9.0.14-win-x64.exe"
+    $script:ConfiguratorInstallerPath  = [System.IO.Path]::Combine($script:OSImageDir, $configuratorLeaf)
+    $script:PuttyInstallerPath         = "$script:OSImageDir\putty-64bit-installer.msi"
+}
+
 $VHDSize     = 500GB   # Thin-provisioned (dynamic) VHDX per VM
 $DownloadTimeoutSeconds = 1800
 $DownloadMaxAttempts = 8
@@ -91,46 +99,99 @@ function Write-Log {
 }
 
 # ---------------------------------------------------------------------------
-# Initialise the attached data disk (raw -> online -> GPT -> NTFS -> F:\)
+# Find and prepare the data disk, keeping whatever drive letter it has.
+# - New (RAW) disk: GPT, one partition, Windows assigns the next free letter,
+#   formatted NTFS "Data".
+# - Existing volume (earlier run, or a data disk reused from a deleted VM):
+#   used as-is - never relabelled or reformatted. A letter is only assigned
+#   if the partition has none.
+# Sets $script:DataDriveLetter; paths are derived from it by Set-DataPaths.
 # ---------------------------------------------------------------------------
+function Get-DataDiskCandidate {
+    # Data disk = not the OS disk and not Azure's temporary disk; pick the largest.
+    Get-Disk | Where-Object {
+        $_.Size -gt 0 -and -not $_.IsBoot -and -not $_.IsSystem -and
+        -not (Get-Partition -DiskNumber $_.Number -ErrorAction SilentlyContinue |
+              Get-Volume -ErrorAction SilentlyContinue |
+              Where-Object { $_.FileSystemLabel -eq "Temporary Storage" })
+    } | Sort-Object Size -Descending | Select-Object -First 1
+}
+
+function Get-PartitionLetter {
+    param($Partition)
+    # DriveLetter is [char]0 when the partition has no letter.
+    return "$($Partition.DriveLetter)".Trim([char]0).Trim()
+}
+
 function Initialize-DataDisk {
-    $DriveLetter = "F"
+    # The managed data disk can surface a little after first boot; wait for it.
+    Write-Log "Looking for the data disk..."
+    $deadline = (Get-Date).AddMinutes(10)
+    $disk = $null
+    while ($true) {
+        Update-HostStorageCache -ErrorAction SilentlyContinue
+        $disk = Get-DataDiskCandidate
+        if ($disk -or (Get-Date) -ge $deadline) { break }
+        Write-Log "Data disk not visible yet - retrying in 15s"
+        Start-Sleep -Seconds 15
+    }
+    if (-not $disk) {
+        $seen = (Get-Disk | ForEach-Object { "#$($_.Number) $([math]::Round($_.Size / 1GB))GB $($_.PartitionStyle) boot=$($_.IsBoot)" }) -join "; "
+        throw "No data disk found after 10 minutes (disks seen: $seen). Check the 1 TB disk is attached to the VM at LUN 0."
+    }
+    Write-Log "Data disk: Number=$($disk.Number), Size=$([math]::Round($disk.Size / 1GB)) GB, PartitionStyle=$($disk.PartitionStyle), Offline=$($disk.IsOffline)"
 
-    # If F:\ already exists, skip
-    if (Test-Path "${DriveLetter}:\") {
-        Write-Log "Drive ${DriveLetter}:\ already exists - skipping disk initialisation"
-        return
+    if ($disk.IsOffline) {
+        Set-Disk -Number $disk.Number -IsOffline $false
+        Write-Log "Disk $($disk.Number) brought online"
+    }
+    if ($disk.IsReadOnly) {
+        Set-Disk -Number $disk.Number -IsReadOnly $false
+        Write-Log "Disk $($disk.Number) read-only cleared"
     }
 
-    Write-Log "Looking for raw (not-initialised) data disks..."
-    $rawDisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -gt 0 } | Select-Object -First 1
-    if (-not $rawDisk) {
-        throw "No raw data disk found to initialise. Is the 1 TB disk attached?"
+    $disk = Get-Disk -Number $disk.Number
+    if ($disk.PartitionStyle -eq "RAW") {
+        Initialize-Disk -Number $disk.Number -PartitionStyle GPT -Confirm:$false
+        Write-Log "Disk $($disk.Number) initialised as GPT"
+    } else {
+        Write-Log "Disk $($disk.Number) already initialised ($($disk.PartitionStyle)) - reusing it"
     }
 
-    Write-Log "Found raw disk: Number=$($rawDisk.Number), Size=$([math]::Round($rawDisk.Size / 1GB)) GB"
-
-    # Bring online if offline
-    if ($rawDisk.IsOffline) {
-        Set-Disk -Number $rawDisk.Number -IsOffline $false
-        Write-Log "Disk $($rawDisk.Number) brought online"
+    # Reuse the existing data partition (earlier run / reused disk) or create one.
+    $partition = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Type -eq "Basic" -or $_.Type -eq "IFS" } |
+                 Sort-Object Size -Descending | Select-Object -First 1
+    if (-not $partition) {
+        $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter
+        Write-Log "Created partition $($partition.PartitionNumber) on disk $($disk.Number)"
     }
 
-    # Clear read-only
-    if ($rawDisk.IsReadOnly) {
-        Set-Disk -Number $rawDisk.Number -IsReadOnly $false
-        Write-Log "Disk $($rawDisk.Number) read-only cleared"
+    $letter = Get-PartitionLetter $partition
+    if (-not $letter) {
+        $partition | Add-PartitionAccessPath -AssignDriveLetter
+        $partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
+        $letter = Get-PartitionLetter $partition
+        if (-not $letter) {
+            throw "Could not assign a drive letter to partition $($partition.PartitionNumber) on disk $($disk.Number)."
+        }
+        Write-Log "Assigned next available drive letter ${letter}:"
+    } else {
+        Write-Log "Using existing drive letter ${letter}:"
     }
 
-    # Initialise as GPT, create partition, format NTFS
-    Initialize-Disk -Number $rawDisk.Number -PartitionStyle GPT -Confirm:$false
-    Write-Log "Disk $($rawDisk.Number) initialised as GPT"
+    $volume = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue
+    if (-not $volume -or [string]::IsNullOrEmpty($volume.FileSystem) -or $volume.FileSystem -eq "RAW") {
+        Format-Volume -DriveLetter $letter -FileSystem NTFS -NewFileSystemLabel "Data" -Confirm:$false | Out-Null
+        Write-Log "Volume ${letter}: formatted as NTFS"
+    } else {
+        Write-Log "Volume ${letter}: already formatted ($($volume.FileSystem), label '$($volume.FileSystemLabel)') - reusing existing contents"
+    }
 
-    $partition = New-Partition -DiskNumber $rawDisk.Number -UseMaximumSize -DriveLetter $DriveLetter
-    Write-Log "Partition created with drive letter ${DriveLetter}:"
-
-    Format-Volume -DriveLetter $DriveLetter -FileSystem NTFS -NewFileSystemLabel "Data" -Confirm:$false | Out-Null
-    Write-Log "Volume ${DriveLetter}: formatted as NTFS"
+    if (-not (Test-Path "${letter}:\")) {
+        throw "Data disk setup finished but ${letter}:\ is not accessible."
+    }
+    $script:DataDriveLetter = $letter
 }
 
 # ---------------------------------------------------------------------------
@@ -950,6 +1011,8 @@ try {
 
     Write-Log "--- Initialising data disk ---"
     Initialize-DataDisk
+    Set-DataPaths -DriveLetter $script:DataDriveLetter
+    Write-Log "Data volume: $($script:DataDriveLetter): (VMs and images under $VMRoot)"
 
     Write-Log "--- Creating directories ---"
     Initialize-Directories
@@ -1015,6 +1078,16 @@ try {
     Get-Date -Format "yyyy-MM-dd HH:mm:ss" | Out-File -FilePath $CompletedFlag -Force
     Write-Log "Completion flag written to $CompletedFlag"
     Write-Log "========== setup.ps1 completed =========="
+
+    Write-Host ""
+    Write-Host "Next steps (full guide: C:\Scripts\K3S-CLUSTER-SETUP.txt):" -ForegroundColor Cyan
+    Write-Host "  Phase 2  Collect FDO vouchers from the bootstrap loader (edgeuser / Password1):" -ForegroundColor White
+    Write-Host "             C:\Scripts\Get-SffNodeVoucher.ps1 -Wait -AutoTrustHostKeys" -ForegroundColor White
+    Write-Host "  Phase 3  In Azure, use the vouchers in C:\vouchers to deploy SFF Linux to each node;" -ForegroundColor White
+    Write-Host "           wait until Azure reports the deployment complete for every node," -ForegroundColor White
+    Write-Host "           then copy each node's portal key (e.g. lab-sff-node-1-keyPair.pem) to C:\Scripts\keys." -ForegroundColor White
+    Write-Host "  Phase 4  Install K3s on the deployed nodes:" -ForegroundColor White
+    Write-Host "             C:\Scripts\Deploy-K3sCluster.ps1 -InstallKubectl" -ForegroundColor White
 
    # Write-Log "--- Starting voucher retrieval (polling mode) in new window ---"
    # Start-Process powershell.exe -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-File", "C:\Scripts\Get-SffNodeVoucher.ps1", "-Wait"

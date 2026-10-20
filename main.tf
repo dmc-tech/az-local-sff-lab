@@ -330,6 +330,16 @@ resource "azurerm_storage_blob" "k3s_setup_instructions" {
   content_md5            = filemd5(var.k3s_setup_instructions_path)
 }
 
+resource "azurerm_storage_blob" "k3s_automation" {
+  for_each               = { for p in var.k3s_automation_script_paths : basename(p) => p }
+  name                   = each.key
+  storage_account_name   = azurerm_storage_account.scripts.name
+  storage_container_name = azurerm_storage_container.scripts.name
+  type                   = "Block"
+  source                 = each.value
+  content_md5            = filemd5(each.value)
+}
+
 # ---------------------------------------------------------------------------
 # Optional: Network Watcher + Virtual Network flow logs (to troubleshoot outbound)
 # Note: Nested VMs egress through the host; Azure flow logs will show host VM NIC IP.
@@ -414,7 +424,7 @@ resource "azurerm_virtual_machine_extension" "provision" {
   # We derive an integer from the script's MD5 so the extension re-executes only when
   # the file content changes.
   settings = jsonencode({
-    fileUris = [
+    fileUris = concat([
       "${azurerm_storage_blob.setup_script.url}${data.azurerm_storage_account_blob_container_sas.scripts_read.sas}",
       "${azurerm_storage_blob.voucher_script.url}${data.azurerm_storage_account_blob_container_sas.scripts_read.sas}",
       "${azurerm_storage_blob.bootstrap_script.url}${data.azurerm_storage_account_blob_container_sas.scripts_read.sas}",
@@ -422,8 +432,10 @@ resource "azurerm_virtual_machine_extension" "provision" {
       "${azurerm_storage_blob.k3s_join_agent_script.url}${data.azurerm_storage_account_blob_container_sas.scripts_read.sas}",
       "${azurerm_storage_blob.k3s_bootstrap_agents_script.url}${data.azurerm_storage_account_blob_container_sas.scripts_read.sas}",
       "${azurerm_storage_blob.k3s_setup_instructions.url}${data.azurerm_storage_account_blob_container_sas.scripts_read.sas}"
-    ]
-    timestamp = parseint(substr(md5("${filemd5(var.setup_script_path)}${filemd5(var.voucher_script_path)}${filemd5(var.bootstrap_script_path)}${filemd5(var.k3s_arc_script_path)}${filemd5(var.k3s_join_agent_script_path)}${filemd5(var.k3s_bootstrap_agents_script_path)}${filemd5(var.k3s_setup_instructions_path)}"), 0, 8), 16)
+      ], [
+      for b in azurerm_storage_blob.k3s_automation : "${b.url}${data.azurerm_storage_account_blob_container_sas.scripts_read.sas}"
+    ])
+    timestamp = parseint(substr(md5("${filemd5(var.setup_script_path)}${filemd5(var.voucher_script_path)}${filemd5(var.bootstrap_script_path)}${filemd5(var.k3s_arc_script_path)}${filemd5(var.k3s_join_agent_script_path)}${filemd5(var.k3s_bootstrap_agents_script_path)}${filemd5(var.k3s_setup_instructions_path)}${join("", [for p in var.k3s_automation_script_paths : filemd5(p)])}"), 0, 8), 16)
   })
 
   protected_settings = jsonencode({
@@ -448,7 +460,9 @@ resource "azurerm_virtual_machine_extension" "provision" {
       basename(var.bootstrap_script_path),
       " -K3sSetupInstructionsFileName ",
       azurerm_storage_blob.k3s_setup_instructions.name,
-      " -OsImagePackageUrl \"",
+      " -AdditionalScriptFileNames \"",
+      join(",", [for p in var.k3s_automation_script_paths : basename(p)]),
+      "\" -OsImagePackageUrl \"",
       var.os_image_package_url,
       "\" -ConfiguratorAppUrl \"",
       var.configurator_app_url,
@@ -473,6 +487,7 @@ resource "azurerm_virtual_machine_extension" "provision" {
     azurerm_storage_blob.k3s_arc_script,
     azurerm_storage_blob.k3s_join_agent_script,
     azurerm_storage_blob.k3s_bootstrap_agents_script,
-    azurerm_storage_blob.k3s_setup_instructions
+    azurerm_storage_blob.k3s_setup_instructions,
+    azurerm_storage_blob.k3s_automation
   ]
 }

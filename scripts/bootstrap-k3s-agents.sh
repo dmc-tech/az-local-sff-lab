@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # Run on the K3s management / server node (NestedVM-01) with sudo. Installs
 # K3s agents on the other two nested VMs over SSH using the same SELinux RPM
 # skip as setup-k3s-arc.sh / k3s-join-agent.sh.
@@ -6,7 +6,8 @@
 # Prerequisites:
 #   - K3s server already installed and running on this host (setup-k3s-arc.sh).
 #   - SSH private key on this host that can authenticate as SSH_USER to each
-#     worker (default after Arc provisioning: clouduser).
+#     worker (default: edgeuser). Key auth only - for the default lab password
+#     login use Deploy-K3sCluster.ps1 on the Hyper-V host instead.
 #   - This script and k3s-join-agent.sh in the same directory (or set JOIN_SCRIPT).
 #
 # Usage:
@@ -27,8 +28,8 @@
 # VM address (often 192.168.100.x from DHCP). Use your real repo or script path:
 #
 #   mkdir $env:USERPROFILE\k3s-stage -Force
-#   scp C:\Scripts\bootstrap-k3s-agents.sh clouduser@<MGMT_IP>:~/k3s/
-#   scp C:\Scripts\k3s-join-agent.sh clouduser@<MGMT_IP>:~/k3s/
+#   scp C:\Scripts\bootstrap-k3s-agents.sh edgeuser@<MGMT_IP>:~/k3s/
+#   scp C:\Scripts\k3s-join-agent.sh edgeuser@<MGMT_IP>:~/k3s/
 #
 # On the management Linux VM:
 #   mkdir -p ~/k3s && chmod +x ~/k3s/bootstrap-k3s-agents.sh ~/k3s/k3s-join-agent.sh
@@ -51,6 +52,9 @@
 #
 set -euo pipefail
 
+# The K3s installer uses /opt/bin when /usr/local/bin is read-only; sudo may not have either on PATH.
+export PATH="$PATH:/usr/local/bin:/opt/bin"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JOIN_SCRIPT="${JOIN_SCRIPT:-$SCRIPT_DIR/k3s-join-agent.sh}"
 
@@ -61,7 +65,7 @@ err()  { echo -e "\n\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
 : "${K3S_WORKER_IPS:=}"
 [[ -n "$K3S_WORKER_IPS" ]] || err "Set K3S_WORKER_IPS to the two worker IPs (space-separated), e.g. export K3S_WORKER_IPS='192.168.100.101 192.168.100.102'"
 
-SSH_USER="${SSH_USER:-clouduser}"
+SSH_USER="${SSH_USER:-edgeuser}"
 SSH_OPTS="${SSH_OPTS:-}"
 
 # When invoked via sudo, prefer the user who invoked sudo for key location.
