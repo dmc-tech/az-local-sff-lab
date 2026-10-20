@@ -22,7 +22,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.3.1"
+$ScriptVersion = "1.3.2"
 $LogFile       = "C:\Scripts\setup.log"
 $CompletedFlag = "C:\Scripts\.setup-completed"
 # Data-disk paths ($VHDRoot, $VMRoot, $OSImageDir, ...) are set by Set-DataPaths
@@ -1084,7 +1084,8 @@ try {
     Write-Host "  Phase 2  Collect FDO vouchers from the bootstrap loader (edgeuser / Password1):" -ForegroundColor White
     Write-Host "             C:\Scripts\Get-SffNodeVoucher.ps1 -Wait -AutoTrustHostKeys" -ForegroundColor White
     Write-Host "  Phase 3  In Azure, use the vouchers in C:\vouchers to deploy SFF Linux to each node;" -ForegroundColor White
-    Write-Host "           wait until Azure reports the deployment complete for every node." -ForegroundColor White
+    Write-Host "           wait until Azure reports the deployment complete for every node," -ForegroundColor White
+    Write-Host "           then copy each node's portal key (e.g. lab-sff-node-1-keyPair.pem) to C:\Scripts\keys." -ForegroundColor White
     Write-Host "  Phase 4  Install K3s on the deployed nodes:" -ForegroundColor White
     Write-Host "             C:\Scripts\Deploy-K3sCluster.ps1 -InstallKubectl" -ForegroundColor White
 

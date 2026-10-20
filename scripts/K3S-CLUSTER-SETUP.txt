@@ -16,7 +16,10 @@ Scripts on this Hyper-V host: C:\Scripts\
 
 Nested VMs: NestedVM-01 (first K3s server), NestedVM-02 and NestedVM-03.
 Network: 192.168.100.0/24 (DHCP 192.168.100.100-200).
-Node login (bootstrap loader and deployed SFF Linux): edgeuser / Password1
+Node login, user edgeuser in both phases:
+  - bootstrap loader (phase 2):  password Password1
+  - deployed SFF Linux (phase 4): per-node private key from the Azure portal
+                                  (e.g. lab-sff-node-1-keyPair.pem) in C:\Scripts\keys
 
 Microsoft overview of SFF deployments (ZTP, provisioning):
   https://learn.microsoft.com/en-us/azure/azure-local/small-form-factor/small-form-factor-overview
@@ -67,6 +70,13 @@ C:\vouchers\<node-ip>\ (plus a copy in C:\vouchers).
      linked above.
   2. Azure deploys SFF Linux onto each nested VM. The nodes reboot during this.
   3. WAIT until Azure reports the deployment as complete for EVERY node.
+  4. Download the private key (PEM) the portal provides for each machine and
+     copy all of them to C:\Scripts\keys on this host, keeping the portal
+     names. They share a prefix and end in the node number, e.g.:
+
+       C:\Scripts\keys\lab-sff-node-1-keyPair.pem
+       C:\Scripts\keys\lab-sff-node-2-keyPair.pem
+       C:\Scripts\keys\lab-sff-node-3-keyPair.pem
 
 Do not start phase 4 until all nodes show as deployed. Deploy-K3sCluster.ps1
 asks you to confirm this before it touches any node.
@@ -83,7 +93,10 @@ Answer "y" when asked whether Azure finished deploying SFF Linux on all nodes
 (or pass -SffLinuxDeployed for an unattended run). The script then:
 
   1. Finds node IPs from Hyper-V MAC addresses + DHCP leases
-  2. Logs in to each node as edgeuser / Password1 (PuTTY plink) and checks sudo
+  2. Logs in to each node as edgeuser with its key from C:\Scripts\keys and
+     checks sudo (Password1 is used if sudo asks for a password). Key <n> is
+     tried on NestedVM-0<n> first; if the portal numbering differs from the
+     VM numbering, the other keys are tried automatically.
   3. Uploads the Linux scripts to /tmp/k3s-lab on each node
   4. Runs k3s-node-prep.sh on each node
   5. Installs the K3s server on NestedVM-01, then joins NestedVM-02/03
@@ -106,8 +119,12 @@ Useful options:
                           the loss of any one node. Default ServerAgents is
                           1 server (NestedVM-01) + 2 agents.
   -K3sVersion v1.33.5+k3s1  Pin a K3s release (default: stable channel).
-  -SshUser / -SshPassword Override the node login (default edgeuser / Password1).
-  -AuthMode Key -SshKeyPath <file>   Use an SSH key instead of the password.
+  -SshKeyDirectory <dir>  Where the portal keys are (default C:\Scripts\keys).
+  -SshKeyPattern 'lab-sff-node-{0}-keyPair.pem'   Exact key name per node number.
+  -SshKeyPath <file>      One key for every node.
+  -AuthMode Password      Log in with -SshUser / -SshPassword instead of keys
+                          (default Auto: keys if any .pem is in the folder).
+  -SshUser / -SshPassword Override the user (edgeuser) / sudo password (Password1).
   -NodeIPs a,b,c          Skip discovery; first IP becomes the first server.
 
 Logs and state: C:\Scripts\k3s\deploy-k3s.log, C:\Scripts\k3s\cluster.json
@@ -139,12 +156,15 @@ User Access Administrator or Owner when Azure RBAC is enabled):
   MANUAL PHASE 4 (alternative)
 --------------------------------------------------------------------------------
 
-From this host, copy the scripts to each node (password: Password1):
+From this host, copy the scripts to each node with that node's key (OpenSSH
+needs the key readable only by you - Deploy-K3sCluster.ps1 keeps such copies
+in C:\Scripts\k3s\keys):
 
-  pscp C:\Scripts\k3s-node-prep.sh C:\Scripts\k3s-install-server.sh `
-       C:\Scripts\k3s-join-agent.sh C:\Scripts\setup_k3s_arc.sh edgeuser@<NODE_IP>:
+  $key = 'C:\Scripts\k3s\keys\lab-sff-node-1-keyPair.pem.key'
+  scp -i $key C:\Scripts\k3s-node-prep.sh C:\Scripts\k3s-install-server.sh `
+      C:\Scripts\k3s-join-agent.sh C:\Scripts\setup_k3s_arc.sh edgeuser@<NODE_IP>:
 
-Then SSH to each node (plink edgeuser@<NODE_IP> or ssh edgeuser@<NODE_IP>).
+Then SSH to each node: ssh -i $key edgeuser@<NODE_IP>
 
 On every node:
 
@@ -183,8 +203,12 @@ Verify on the first server:
 - Deploy-K3sCluster.ps1 stops at the confirmation: finish phase 3 in Azure
   first, then answer "y" (or pass -SffLinuxDeployed).
 
-- "SSH as edgeuser not possible yet": the node is rebooting or not reachable.
-  Test: plink -ssh edgeuser@<IP> -pw Password1 hostname. Use -Wait to poll.
+- "No SSH keys found": copy the portal .pem files to C:\Scripts\keys.
+
+- "SSH as edgeuser not possible yet with keys ...": the node is rebooting, not
+  reachable, or none of the keys belongs to it (wrong/missing download). Test:
+    ssh -i C:\Scripts\k3s\keys\<key>.key edgeuser@<IP> hostname
+  Use -Wait to poll while nodes reboot.
 
 - "cannot sudo with the supplied password": check -SshPassword, or that
   edgeuser is allowed to sudo on that node.

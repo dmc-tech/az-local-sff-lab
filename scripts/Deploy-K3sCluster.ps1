@@ -39,16 +39,32 @@
     Without it the script asks interactively.
 
 .PARAMETER AuthMode
-    Password (default): log in as -SshUser with -SshPassword using PuTTY plink
-    (installed by setup.ps1). Key: OpenSSH ssh.exe with -SshKeyPath, or keys
-    in -SshKeyDirectory named <VMName>.pem / <IP>.pem / the only file there.
+    Auto (default): Key when any *.pem is in -SshKeyDirectory, otherwise Password.
+    Key: OpenSSH ssh.exe with the per-node keys the Azure portal provides when
+    the SFF nodes are provisioned (see -SshKeyDirectory). Password: -SshUser /
+    -SshPassword via PuTTY plink (installed by setup.ps1).
+
+.PARAMETER SshKeyDirectory
+    Folder with the per-node private keys downloaded from the Azure portal.
+    Default C:\Scripts\keys. Keys are matched to nodes by number: a file whose
+    name ends in <n>.pem or <n>-keyPair.pem (e.g. lab-sff-node-2-keyPair.pem)
+    belongs to node <n> (NestedVM-02, or the 2nd -NodeIPs entry). If that key
+    is rejected the other keys are tried, so a numbering mismatch only costs a
+    retry. <VMName>.pem / <IP>.pem also work.
+
+.PARAMETER SshKeyPattern
+    Optional explicit key file name with {0} for the node number,
+    e.g. "lab-sff-node-{0}-keyPair.pem".
+
+.PARAMETER SshKeyPath
+    One private key to use for every node.
 
 .PARAMETER SshUser
     Default edgeuser.
 
 .PARAMETER SshPassword
-    Default Password1 (the lab's hard-coded node password). Also used for sudo
-    when the user does not have passwordless sudo.
+    Default Password1 (the lab's hard-coded node password). Used to log in in
+    Password mode, and for sudo in any mode when the user lacks passwordless sudo.
 
 .PARAMETER NodeIPs
     Node IPs in role order (first = initial server). When omitted, nodes are
@@ -72,8 +88,9 @@
 .EXAMPLE
     C:\Scripts\Deploy-K3sCluster.ps1 -InstallKubectl
 
-    Asks you to confirm SFF Linux is deployed, then builds a 1 server + 2 agent
-    cluster as edgeuser / Password1 and installs kubectl on the host.
+    With lab-sff-node-1/2/3-keyPair.pem from the portal in C:\Scripts\keys:
+    asks you to confirm SFF Linux is deployed, then builds a 1 server + 2 agent
+    cluster as edgeuser and installs kubectl on the host.
 
 .EXAMPLE
     C:\Scripts\Deploy-K3sCluster.ps1 -SffLinuxDeployed -Topology HA -Wait
@@ -104,12 +121,13 @@ param(
     [string]$DhcpScopeId = "192.168.100.0",
     [string]$NodeCidr = "192.168.100.0/24",
 
-    [ValidateSet("Password", "Key")]
-    [string]$AuthMode = "Password",
+    [ValidateSet("Auto", "Key", "Password")]
+    [string]$AuthMode = "Auto",
     [string]$SshUser = "edgeuser",
     [string]$SshPassword = "Password1",
     [string]$SshKeyPath,
     [string]$SshKeyDirectory = "C:\Scripts\keys",
+    [string]$SshKeyPattern,
 
     [ValidateSet("ServerAgents", "HA")]
     [string]$Topology = "ServerAgents",
@@ -137,7 +155,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.1.0"
+$ScriptVersion = "1.2.0"
 $RemoteDir = "/tmp/k3s-lab"
 # Text piped to ssh.exe is base64 (see Send-RemoteText), so ASCII is all that is needed.
 $OutputEncoding = [System.Text.Encoding]::ASCII
@@ -375,10 +393,11 @@ function Normalize-MacAddress {
 }
 
 function New-NodeObject {
-    param([string]$Name, [string]$IP)
+    param([string]$Name, [string]$IP, [int]$Number)
     return [pscustomobject]@{
         Name              = $Name
         IP                = $IP
+        Number            = $Number
         KeyPath           = $null
         HostKey           = $null
         SudoNeedsPassword = $false
@@ -391,7 +410,8 @@ function New-NodeObject {
 
 function Get-ClusterNodes {
     if ($NodeIPs) {
-        return @($NodeIPs | ForEach-Object { New-NodeObject -Name $_ -IP $_ })
+        $i = 0
+        return @($NodeIPs | ForEach-Object { $i++; New-NodeObject -Name $_ -IP $_ -Number $i })
     }
 
     $vms = @(Get-VM -ErrorAction Stop | Where-Object { $_.Name -like "$NestedVmPrefix-*" } | Sort-Object Name)
@@ -414,37 +434,71 @@ function Get-ClusterNodes {
         if (-not $lease) {
             throw "No active DHCP lease in scope $DhcpScopeId for $($vm.Name) (MAC $mac)."
         }
-        $nodes += New-NodeObject -Name $vm.Name -IP $lease.IPAddress.IPAddressToString
+        # Node number from the VM name suffix (NestedVM-02 -> 2); matches the portal key numbering.
+        $number = $nodes.Count + 1
+        if ($vm.Name -match "(\d+)$") { $number = [int]$Matches[1] }
+        $nodes += New-NodeObject -Name $vm.Name -IP $lease.IPAddress.IPAddressToString -Number $number
     }
     return $nodes
 }
 
-# Key mode: copies the node's private key to a private, LF-normalised cache file.
-function Resolve-NodeKey {
-    param($Node)
-    $source = $null
+# ---------------------------------------------------------------------------
+# Key mode: per-node keys downloaded from the Azure portal at provisioning
+# ---------------------------------------------------------------------------
+function Get-KeyFiles {
     if ($SshKeyPath) {
-        $source = $SshKeyPath
-    } else {
-        foreach ($candidate in @("$($Node.Name).pem", "$($Node.IP).pem", "$($Node.Name)", "$($Node.IP)")) {
-            $p = Join-Path $SshKeyDirectory $candidate
-            if (Test-Path $p -PathType Leaf) { $source = $p; break }
-        }
-        if (-not $source -and (Test-Path $SshKeyDirectory)) {
-            $all = @(Get-ChildItem -Path $SshKeyDirectory -File | Where-Object { $_.Extension -ne ".pub" })
-            if ($all.Count -eq 1) { $source = $all[0].FullName }
-        }
+        if (-not (Test-Path $SshKeyPath -PathType Leaf)) { throw "-SshKeyPath '$SshKeyPath' not found." }
+        return @(Get-Item $SshKeyPath)
     }
-    if (-not $source -or -not (Test-Path $source -PathType Leaf)) {
-        throw "No SSH key for $($Node.Name). Put the key in $SshKeyDirectory (as $($Node.Name).pem, or a single key for all nodes), pass -SshKeyPath, or use -AuthMode Password."
-    }
+    if (-not (Test-Path $SshKeyDirectory)) { return @() }
+    return @(Get-ChildItem -Path $SshKeyDirectory -File |
+             Where-Object { $_.Extension -notin @(".pub", ".ppk", ".txt", ".md") } |
+             Sort-Object Name)
+}
 
+# Number in a key file name: lab-sff-node-2-keyPair.pem -> 2, node3.pem -> 3.
+function Get-KeyNumber {
+    param([string]$FileName)
+    if ($FileName -match "(\d+)(?:[-_]?key[-_]?pair)?\.pem$") { return [int]$Matches[1] }
+    return $null
+}
+
+# Ordered key candidates for a node: explicit pattern, name/IP match, number
+# match, then every other key (handles portal numbering that differs from the
+# Hyper-V VM numbering).
+function Get-NodeKeyCandidates {
+    param($Node)
+    $files = @(Get-KeyFiles)
+    if ($files.Count -eq 0) {
+        throw "No SSH keys found in $SshKeyDirectory. Copy the per-node .pem files from the Azure portal there, pass -SshKeyPath, or use -AuthMode Password."
+    }
+    $ordered = New-Object System.Collections.Generic.List[object]
+    if ($SshKeyPattern) {
+        $byPattern = Join-Path $SshKeyDirectory ($SshKeyPattern -f $Node.Number)
+        foreach ($f in ($files | Where-Object { $_.FullName -ieq $byPattern })) { $ordered.Add($f) }
+    }
+    foreach ($f in ($files | Where-Object { $_.BaseName -ieq $Node.Name -or $_.BaseName -ieq $Node.IP })) { $ordered.Add($f) }
+    foreach ($f in ($files | Where-Object { (Get-KeyNumber $_.Name) -eq $Node.Number })) { $ordered.Add($f) }
+    foreach ($f in $files) { $ordered.Add($f) }
+    $seen = @{}
+    $unique = foreach ($f in $ordered) {
+        if (-not $seen.ContainsKey($f.FullName)) { $seen[$f.FullName] = $true; $f }
+    }
+    return @($unique)
+}
+
+# OpenSSH refuses keys other users can read and some versions reject CRLF, so
+# use a private LF-normalised copy of each key.
+function Get-CachedKeyPath {
+    param($KeyFile)
     if (-not (Test-Path $KeyCacheDir)) {
         New-Item -Path $KeyCacheDir -ItemType Directory -Force | Out-Null
     }
-    $dest = Join-Path $KeyCacheDir ("{0}.key" -f ($Node.Name -replace "[^A-Za-z0-9\.-]", "_"))
-    Write-LfFile -Path $dest -Content ([System.IO.File]::ReadAllText($source))
-    Set-OwnerOnlyAcl -Path $dest
+    $dest = Join-Path $KeyCacheDir ("{0}.key" -f ($KeyFile.Name -replace "[^A-Za-z0-9\.-]", "_"))
+    if (-not (Test-Path $dest) -or (Get-Item $dest).LastWriteTimeUtc -lt $KeyFile.LastWriteTimeUtc) {
+        Write-LfFile -Path $dest -Content ([System.IO.File]::ReadAllText($KeyFile.FullName))
+        Set-OwnerOnlyAcl -Path $dest
+    }
     return $dest
 }
 
@@ -452,19 +506,35 @@ function Resolve-NodeKey {
 # hostname and whether sudo needs the SSH password.
 function Test-NodeReady {
     param($Node)
+    # Always exits 0 once logged in, so a non-zero code means SSH itself failed.
+    $probe = "hostname; if sudo -n true 2>/dev/null; then echo SUDO_OK; else echo SUDO_PW; fi"
+    $r = $null
     if ($AuthMode -eq "Password") {
         $Node.HostKey = Get-PlinkHostKey -Node $Node
+        $r = Invoke-Remote -Node $Node -Command $probe -Quiet -AllowFailure
+    } else {
+        $tried = @()
+        foreach ($keyFile in (Get-NodeKeyCandidates -Node $Node)) {
+            $Node.KeyPath = Get-CachedKeyPath -KeyFile $keyFile
+            $r = Invoke-Remote -Node $Node -Command $probe -Quiet -AllowFailure
+            if ($r.ExitCode -eq 0) {
+                Write-Status "$($Node.Name) ($($Node.IP)): logged in as $SshUser with key $($keyFile.Name)" "Green"
+                break
+            }
+            $tried += $keyFile.Name
+        }
+        if ($r.ExitCode -ne 0) {
+            $Node.KeyPath = $null
+            $detail = ($r.Lines | Where-Object { $_ } | Select-Object -Last 1)
+            return "SSH as $SshUser not possible yet with keys $($tried -join ', ') ($detail)"
+        }
     }
-    # Always exits 0 once logged in, so a non-zero code means SSH itself failed.
-    $r = Invoke-Remote -Node $Node -Command "hostname; if sudo -n true 2>/dev/null; then echo SUDO_OK; else echo SUDO_PW; fi" -Quiet -AllowFailure
     if ($r.ExitCode -ne 0) {
         $detail = ($r.Lines | Where-Object { $_ } | Select-Object -Last 1)
         return "SSH as $SshUser not possible yet ($detail)"
     }
     if ($r.Output -match "SUDO_PW") {
-        if ($AuthMode -ne "Password") {
-            throw "$($Node.Name): SSH works but '$SshUser' has no passwordless sudo. Use -AuthMode Password (sudo with -SshPassword) or grant NOPASSWD sudo."
-        }
+        # -SshPassword is used for sudo whichever way we logged in.
         $Node.SudoNeedsPassword = $true
         $check = Invoke-Remote -Node $Node -Command "sudo true && echo SUDO_OK" -Quiet -AllowFailure
         if ($check.Output -notmatch "SUDO_OK") {
@@ -489,7 +559,6 @@ function Wait-ForNodes {
             $nodes = @(Get-ClusterNodes)
             foreach ($n in $nodes) {
                 try {
-                    if ($AuthMode -eq "Key") { $n.KeyPath = Resolve-NodeKey -Node $n }
                     $reason = Test-NodeReady -Node $n
                     if ($reason) { $problems += "$($n.Name) ($($n.IP)): $reason" }
                 } catch {
@@ -704,6 +773,12 @@ try {
     Write-Step "K3s cluster deployment started (topology: $Topology)"
     Confirm-SffLinuxDeployed
 
+    if ($AuthMode -eq "Auto") {
+        $keyCount = @(Get-KeyFiles | Where-Object { $_.Extension -eq ".pem" -or $SshKeyPath }).Count
+        if ($keyCount -gt 0) { $AuthMode = "Key" } else { $AuthMode = "Password" }
+        Write-Status "AuthMode Auto -> $AuthMode ($keyCount key file(s) in $SshKeyDirectory)"
+    }
+
     if ($AuthMode -eq "Password") {
         $script:PlinkExe = Resolve-PlinkExe
         Write-Status "Auth: password for '$SshUser' via $script:PlinkExe"
@@ -712,7 +787,10 @@ try {
         }
     } else {
         $script:SshExe = Resolve-SshExe
-        Write-Status "Auth: SSH key for '$SshUser' via $script:SshExe"
+        Write-Status "Auth: per-node SSH keys for '$SshUser' via $script:SshExe"
+        # Host keys change when Azure replaces the bootstrap loader with SFF
+        # Linux, so trust on first use per run rather than across runs.
+        Remove-Item -Path $KnownHostsFile -Force -ErrorAction SilentlyContinue
     }
 
     $scripts = Get-StagedScripts

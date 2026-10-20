@@ -146,7 +146,7 @@ ssh-keygen -t rsa -N '""' -f C:\Users\azureadmin\.ssh\id_rsa
 # Then distribute the public key to each node once SSH is available
 ```
 
-2. **Deploy SFF Linux from Azure.** The ISO the nested VMs boot is only a **bootstrap loader**. Use the vouchers from step 1 to provision the Small Form Factor devices in Azure ([Microsoft overview](https://learn.microsoft.com/en-us/azure/azure-local/small-form-factor/small-form-factor-overview)). Azure then deploys **SFF Linux** onto each node. Wait until Azure reports the deployment as complete for **every** node before you go on.
+2. **Deploy SFF Linux from Azure.** The ISO the nested VMs boot is only a **bootstrap loader**. Use the vouchers from step 1 to provision the Small Form Factor devices in Azure ([Microsoft overview](https://learn.microsoft.com/en-us/azure/azure-local/small-form-factor/small-form-factor-overview)). Azure then deploys **SFF Linux** onto each node. Wait until Azure reports the deployment as complete for **every** node before you go on. Then download the private key (PEM) the portal provides for each machine and copy them all into **`C:\Scripts\keys\`** on the Hyper-V host. Keep the portal names, which share a prefix and end in the node number (for example `lab-sff-node-1-keyPair.pem` … `lab-sff-node-3-keyPair.pem`).
 
 3. **K3s cluster (automated).** Once SFF Linux is deployed on all nodes, run one command from an elevated PowerShell on the Hyper-V host:
 
@@ -155,7 +155,7 @@ C:\Scripts\Deploy-K3sCluster.ps1 -InstallKubectl
 ```
 
    The script first asks you to confirm that the SFF Linux deployment finished (pass `-SffLinuxDeployed` for unattended runs), because K3s installed on the bootstrap loader would be wiped by the deployment. It then:
-   - discovers the node IPs and logs in as `edgeuser` / `Password1` with PuTTY `plink` (installed by `setup.ps1`)
+   - discovers the node IPs and logs in to each node as `edgeuser` with its portal key. Key `n` is tried on `NestedVM-0n` first, then the others, in case the portal numbering differs. If `sudo` asks for a password, it uses `Password1`.
    - prepares the nodes, installs the K3s server on `NestedVM-01` and joins the others
    - waits for all nodes to be `Ready` and writes a kubeconfig to `C:\Scripts\k3s\kubeconfig`
 
@@ -172,7 +172,8 @@ C:\Scripts\k3s\bin\kubectl.exe get nodes -o wide
 | `-K3sVersion v1.33.5+k3s1` | Pin a K3s release (default: stable channel) |
 | `-EnableArc` | Connect the cluster to Azure Arc with Azure RBAC; add `-ArcServicePrincipal`/`-ArcTenantId` for unattended login, otherwise a device code is shown |
 | `-Wait` | Poll until every node accepts SSH (e.g. while nodes reboot after the deployment) |
-| `-SshUser` / `-SshPassword` / `-AuthMode Key -SshKeyPath` | Override the node login (default `edgeuser` / `Password1`) |
+| `-SshKeyDirectory` / `-SshKeyPattern 'lab-sff-node-{0}-keyPair.pem'` / `-SshKeyPath` | Where the portal keys are, an exact per-node name, or one key for all nodes |
+| `-AuthMode Password` / `-SshUser` / `-SshPassword` | Log in with a password instead of keys; override the user (`edgeuser`) or the `sudo` password (`Password1`) |
 | `-NodeIPs` | Skip node discovery; the first IP becomes the first server |
 
    The full four-phase walkthrough (bootstrap loader, vouchers, Azure deployment, K3s), the manual fallback, and troubleshooting are in **`C:\Scripts\K3S-CLUSTER-SETUP.txt`** ([source](scripts/K3S-CLUSTER-SETUP.txt)). The nodes need outbound HTTPS to `get.k3s.io` and `github.com`.
