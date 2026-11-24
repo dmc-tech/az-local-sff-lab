@@ -53,6 +53,16 @@
     is rejected the other keys are tried, so a numbering mismatch only costs a
     retry. <VMName>.pem / <IP>.pem also work.
 
+    The portal downloads the keys to the browser's Downloads folder. When
+    -SshKeyDirectory has no keys, the script copies them from -DownloadsPath.
+
+.PARAMETER DownloadsPath
+    Where the portal key downloads are looked for. Default: the current user's
+    Downloads folder (the browser session on this host).
+
+.PARAMETER DownloadKeyFilter
+    File name filter for portal keys in -DownloadsPath. Default *keyPair*.pem.
+
 .PARAMETER SshKeyPattern
     Optional explicit key file name with {0} for the node number,
     e.g. "lab-sff-node-{0}-keyPair.pem".
@@ -129,6 +139,8 @@ param(
     [string]$SshKeyPath,
     [string]$SshKeyDirectory = "C:\Scripts\keys",
     [string]$SshKeyPattern,
+    [string]$DownloadsPath,
+    [string]$DownloadKeyFilter = "*keyPair*.pem",
 
     [ValidateSet("ServerAgents", "HA")]
     [string]$Topology = "ServerAgents",
@@ -156,7 +168,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.2.1"
+$ScriptVersion = "1.3.0"
 $RemoteDir = "/tmp/k3s-lab"
 # Text piped to ssh.exe is base64 (see Send-RemoteText), so ASCII is all that is needed.
 $OutputEncoding = [System.Text.Encoding]::ASCII
@@ -457,11 +469,54 @@ function Get-KeyFiles {
              Sort-Object Name)
 }
 
-# Number in a key file name: lab-sff-node-2-keyPair.pem -> 2, node3.pem -> 3.
+# Browsers save repeat downloads as "name (1).pem"; drop that suffix.
+function Get-CanonicalKeyName {
+    param([string]$FileName)
+    return ($FileName -replace "\s*\(\d+\)(?=\.pem$)", "")
+}
+
+# Number in a key file name: lab-sff-node-2-keyPair.pem -> 2, node3.pem -> 3,
+# lab-sff-node-2-keyPair (1).pem -> 2.
 function Get-KeyNumber {
     param([string]$FileName)
-    if ($FileName -match "(\d+)(?:[-_]?key[-_]?pair)?\.pem$") { return [int]$Matches[1] }
+    if ((Get-CanonicalKeyName $FileName) -match "(\d+)(?:[-_]?key[-_]?pair)?\.pem$") { return [int]$Matches[1] }
     return $null
+}
+
+function Get-DefaultDownloadsPath {
+    # Honour a relocated Downloads folder (Explorer "Location" tab).
+    $guid = "{374DE290-123F-4565-9164-39C4925E467B}"
+    try {
+        $raw = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" -Name $guid -ErrorAction Stop).$guid
+        $expanded = [Environment]::ExpandEnvironmentVariables($raw)
+        if ($expanded -and (Test-Path $expanded)) { return $expanded }
+    } catch { }
+    return (Join-Path $env:USERPROFILE "Downloads")
+}
+
+# The portal downloads each node's key to the browser's Downloads folder.
+# Copy them (newest copy of each, browser " (1)" suffix removed) into
+# -SshKeyDirectory so later runs and the manual steps find them there.
+# Returns the number of keys copied.
+function Import-PortalKeys {
+    if ($SshKeyPath) { return 0 }
+    if (@(Get-KeyFiles | Where-Object { $_.Extension -eq ".pem" }).Count -gt 0) { return 0 }
+    $from = $script:ResolvedDownloadsPath
+    if (-not (Test-Path $from)) { return 0 }
+    $downloads = @(Get-ChildItem -Path $from -File -Filter $DownloadKeyFilter -ErrorAction SilentlyContinue)
+    if ($downloads.Count -eq 0) { return 0 }
+
+    if (-not (Test-Path $SshKeyDirectory)) {
+        New-Item -Path $SshKeyDirectory -ItemType Directory -Force | Out-Null
+    }
+    $copied = 0
+    foreach ($group in ($downloads | Group-Object { Get-CanonicalKeyName $_.Name })) {
+        $newest = $group.Group | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+        Copy-Item -Path $newest.FullName -Destination (Join-Path $SshKeyDirectory $group.Name) -Force
+        Write-Status "Copied portal key $($newest.Name) from $from to $SshKeyDirectory\$($group.Name)" "Green"
+        $copied++
+    }
+    return $copied
 }
 
 # Ordered key candidates for a node: explicit pattern, name/IP match, number
@@ -777,6 +832,21 @@ try {
     Write-Step "K3s cluster deployment started (topology: $Topology)"
     Confirm-SffLinuxDeployed
 
+    $script:ResolvedDownloadsPath = $DownloadsPath
+    if (-not $script:ResolvedDownloadsPath) { $script:ResolvedDownloadsPath = Get-DefaultDownloadsPath }
+
+    if ($AuthMode -ne "Password") {
+        $null = Import-PortalKeys
+        $keyDeadline = (Get-Date).AddMinutes($TimeoutMinutes)
+        while ($Wait -and -not $SshKeyPath -and
+               @(Get-KeyFiles | Where-Object { $_.Extension -eq ".pem" }).Count -eq 0 -and
+               (Get-Date) -lt $keyDeadline) {
+            Write-Status "No portal keys yet in $SshKeyDirectory or $($script:ResolvedDownloadsPath) ($DownloadKeyFilter) - retrying in ${PollIntervalSeconds}s" "DarkGray"
+            Start-Sleep -Seconds $PollIntervalSeconds
+            $null = Import-PortalKeys
+        }
+    }
+
     if ($AuthMode -eq "Auto") {
         $keyCount = @(Get-KeyFiles | Where-Object { $_.Extension -eq ".pem" -or $SshKeyPath }).Count
         if ($keyCount -eq 0) {
@@ -786,9 +856,11 @@ try {
             if (Test-Path $SshKeyDirectory) { $found = @(Get-ChildItem -Path $SshKeyDirectory -File | ForEach-Object { $_.Name }) }
             $foundText = "none"
             if ($found.Count -gt 0) { $foundText = $found -join ", " }
-            throw ("No .pem keys in $SshKeyDirectory (files there: $foundText). The deployed SFF Linux nodes " +
-                   "need the per-node private keys the Azure portal provides (e.g. lab-sff-node-1-keyPair.pem). " +
-                   "Copy them to $SshKeyDirectory, or pass -SshKeyDirectory / -SshKeyPath. " +
+            throw ("No .pem keys in $SshKeyDirectory (files there: $foundText) and no $DownloadKeyFilter in " +
+                   "$($script:ResolvedDownloadsPath). The deployed SFF Linux nodes need the per-node private keys the " +
+                   "Azure portal downloads when the nodes are provisioned (e.g. lab-sff-node-1-keyPair.pem). If they " +
+                   "were downloaded on another PC, copy them to $SshKeyDirectory; otherwise pass -DownloadsPath, " +
+                   "-SshKeyDirectory or -SshKeyPath. Add -Wait to poll until they appear. " +
                    "Use -AuthMode Password only if the nodes accept '$SshUser' with a password.")
         }
         $AuthMode = "Key"

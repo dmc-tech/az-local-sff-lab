@@ -18,8 +18,8 @@ Nested VMs: NestedVM-01 (first K3s server), NestedVM-02 and NestedVM-03.
 Network: 192.168.100.0/24 (DHCP 192.168.100.100-200).
 Node login, user edgeuser in both phases:
   - bootstrap loader (phase 2):  password Password1
-  - deployed SFF Linux (phase 4): per-node private key from the Azure portal
-                                  (e.g. lab-sff-node-1-keyPair.pem) in C:\Scripts\keys
+  - deployed SFF Linux (phase 4): per-node private key the Azure portal downloads
+                                  at provisioning (e.g. lab-sff-node-1-keyPair.pem)
 
 Microsoft overview of SFF deployments (ZTP, provisioning):
   https://learn.microsoft.com/en-us/azure/azure-local/small-form-factor/small-form-factor-overview
@@ -70,13 +70,19 @@ C:\vouchers\<node-ip>\ (plus a copy in C:\vouchers).
      linked above.
   2. Azure deploys SFF Linux onto each nested VM. The nodes reboot during this.
   3. WAIT until Azure reports the deployment as complete for EVERY node.
-  4. Download the private key (PEM) the portal provides for each machine and
-     copy all of them to C:\Scripts\keys on this host, keeping the portal
-     names. They share a prefix and end in the node number, e.g.:
+  4. When each node is provisioned, the portal downloads its private key (PEM)
+     to the browser's Downloads folder. The names share a prefix and end in
+     the node number, e.g.:
 
-       C:\Scripts\keys\lab-sff-node-1-keyPair.pem
-       C:\Scripts\keys\lab-sff-node-2-keyPair.pem
-       C:\Scripts\keys\lab-sff-node-3-keyPair.pem
+       lab-sff-node-1-keyPair.pem
+       lab-sff-node-2-keyPair.pem
+       lab-sff-node-3-keyPair.pem
+
+     If you ran the portal in a browser on THIS host, leave them in Downloads:
+     Deploy-K3sCluster.ps1 copies any *keyPair*.pem from your Downloads folder
+     into C:\Scripts\keys (newest copy of each; "name (1).pem" duplicates from
+     repeat downloads are handled). If you provisioned from another PC, copy
+     the files to C:\Scripts\keys on this host yourself.
 
 Do not start phase 4 until all nodes show as deployed. Deploy-K3sCluster.ps1
 asks you to confirm this before it touches any node.
@@ -93,7 +99,9 @@ Answer "y" when asked whether Azure finished deploying SFF Linux on all nodes
 (or pass -SffLinuxDeployed for an unattended run). The script then:
 
   1. Finds node IPs from Hyper-V MAC addresses + DHCP leases
-  2. Logs in to each node as edgeuser with its key from C:\Scripts\keys and
+  2. Copies the portal keys from your Downloads folder to C:\Scripts\keys if
+     that folder has none yet (-Wait polls until they appear), then
+     logs in to each node as edgeuser with its key from C:\Scripts\keys and
      checks sudo (Password1 is used if sudo asks for a password). Key <n> is
      tried on NestedVM-0<n> first; if the portal numbering differs from the
      VM numbering, the other keys are tried automatically.
@@ -120,6 +128,7 @@ Useful options:
                           1 server (NestedVM-01) + 2 agents.
   -K3sVersion v1.33.5+k3s1  Pin a K3s release (default: stable channel).
   -SshKeyDirectory <dir>  Where the portal keys are (default C:\Scripts\keys).
+  -DownloadsPath <dir>    Where the browser saved them (default: your Downloads).
   -SshKeyPattern 'lab-sff-node-{0}-keyPair.pem'   Exact key name per node number.
   -SshKeyPath <file>      One key for every node.
   -AuthMode Password      Log in with -SshUser / -SshPassword instead of keys
@@ -203,7 +212,11 @@ Verify on the first server:
 - Deploy-K3sCluster.ps1 stops at the confirmation: finish phase 3 in Azure
   first, then answer "y" (or pass -SffLinuxDeployed).
 
-- "No SSH keys found": copy the portal .pem files to C:\Scripts\keys.
+- "No .pem keys in C:\Scripts\keys ... and no *keyPair*.pem in <Downloads>":
+  the keys were downloaded by a different Windows user or on another PC.
+  Copy them to C:\Scripts\keys, or pass -DownloadsPath <folder>. Use -Wait
+  to keep polling until they appear. The error lists the files it did find,
+  e.g. a browser may have saved "....pem.txt".
 
 - "SSH as edgeuser not possible yet with keys ...": the node is rebooting, not
   reachable, or none of the keys belongs to it (wrong/missing download). Test:
