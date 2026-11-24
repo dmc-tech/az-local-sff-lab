@@ -11,7 +11,7 @@ param adminPassword = 'CHANGE_ME'
 // param vmName = 'vm-hv-host-1'
 // param nestedVmCount = 3   // 1 = single-node SFF lab; 3 = three-node cluster
 // Azure Local OS package (ZIP with provision-os.iso) and Configurator app — defaults are in main.bicep if you omit these:
-// param osImagePackageUrl = 'https://azurestackreleases.download.prss.microsoft.com/.../roe-....zip'
-// param configuratorAppUrl = 'https://azurestackreleases.download.prss.microsoft.com/.../ConfiguratorAppV2-....msix'
+// param osImagePackageUrl = 'https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/ROE/Composition/10.2610.1.3004/roe-10.2610.1.3004.zip'
+// param configuratorAppUrl = 'https://azurestackreleases.download.prss.microsoft.com/dbazure/AzureLocal/ConfiguratorApp/10.3544.1.3005/V2/ConfiguratorAppV2-10.3544.1.3005.msix'
 // param enableNsgFlowLogs = true
 // param enableTrafficAnalytics = true

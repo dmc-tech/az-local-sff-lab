@@ -62,3 +62,11 @@ output "hyperv_ready_note" {
   description = "Reminder to reboot the VM after Hyper-V installation"
   value       = "After first boot, reboot the VM once to complete Hyper-V role installation and run the setup script. Connect via Azure Bastion."
 }
+
+output "vm_login_role_assignments" {
+  description = "Entra ID principals granted the VM login role on the resource group"
+  value = {
+    role       = var.vm_login_role
+    principals = local.vm_login_principal_ids
+  }
+}

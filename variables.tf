@@ -110,6 +110,33 @@ variable "k3s_setup_instructions_path" {
   default     = "scripts/K3S-CLUSTER-SETUP.txt"
 }
 
+variable "vm_login_role" {
+  description = "Built-in role granted on the resource group for Microsoft Entra ID sign-in to the host VM"
+  type        = string
+  default     = "Virtual Machine Administrator Login"
+
+  validation {
+    condition     = contains(["Virtual Machine Administrator Login", "Virtual Machine User Login"], var.vm_login_role)
+    error_message = "vm_login_role must be \"Virtual Machine Administrator Login\" or \"Virtual Machine User Login\"."
+  }
+}
+
+variable "vm_login_principal_ids" {
+  description = "Entra ID object IDs (users or groups) granted vm_login_role on the resource group. Empty = the identity running Terraform."
+  type        = list(string)
+  default     = []
+}
+
+variable "k3s_automation_script_paths" {
+  description = "K3s automation scripts copied to C:\\Scripts on the Hyper-V host (Deploy-K3sCluster.ps1 orchestrates the cluster build)"
+  type        = list(string)
+  default = [
+    "scripts/Deploy-K3sCluster.ps1",
+    "scripts/k3s-node-prep.sh",
+    "scripts/k3s-install-server.sh",
+  ]
+}
+
 variable "os_image_package_url" {
   description = "URL for the Azure Local OS package (ZIP containing provision-os.iso) or a direct ISO URL."
   type        = string

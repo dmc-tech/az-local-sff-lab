@@ -16,7 +16,10 @@ param(
     [ValidateSet(1, 3)]
     [int]$NestedVmCount = 3,
     [Parameter(Mandatory = $true)][string]$AdminUsername,
-    [Parameter(Mandatory = $true)][string]$AdminPassword
+    [Parameter(Mandatory = $true)][string]$AdminPassword,
+    # Comma-separated extra files downloaded by the extension to copy into C:\Scripts
+    # (K3s automation: Deploy-K3sCluster.ps1, k3s-node-prep.sh, k3s-install-server.sh).
+    [string]$AdditionalScriptFileNames = ''
 )
 
 # CSE runs commandToExecute via cmd.exe: single quotes are literal, so args can arrive as 'setup.ps1'.
@@ -43,6 +46,7 @@ $ConfiguratorAppUrl = Shrink-CseArg $ConfiguratorAppUrl
 $NestedVmPrefix = Shrink-CseArg $NestedVmPrefix
 $AdminUsername = Shrink-CseArg $AdminUsername
 $AdminPassword = Shrink-CseArg $AdminPassword
+$AdditionalScriptFileNames = Shrink-CseArg $AdditionalScriptFileNames
 
 $ErrorActionPreference = 'Stop'
 
@@ -56,6 +60,10 @@ Copy-Item -Path ".\$K3sArcScriptFileName" -Destination "C:\Scripts\$K3sArcScript
 Copy-Item -Path ".\$K3sJoinAgentScriptFileName" -Destination "C:\Scripts\$K3sJoinAgentScriptFileName" -Force
 Copy-Item -Path ".\$K3sBootstrapAgentsScriptFileName" -Destination "C:\Scripts\$K3sBootstrapAgentsScriptFileName" -Force
 Copy-Item -Path ".\$K3sSetupInstructionsFileName" -Destination "C:\Scripts\$K3sSetupInstructionsFileName" -Force
+foreach ($extra in ($AdditionalScriptFileNames -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    Copy-Item -Path ".\$extra" -Destination "C:\Scripts\$extra" -Force
+}
+New-Item -Path 'C:\Scripts\keys' -ItemType Directory -Force | Out-Null
 
 New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' -Name 'HideSCAHealth' -Value 1 -PropertyType DWord -Force
 # Use .NET for this key: PowerShell's registry provider + New-Item -Force can throw "Cannot delete a subkey tree..." on some Server images.
@@ -92,6 +100,13 @@ New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\SQMClient\Windows' -Force -Err
 New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\SQMClient\Windows' -Name 'CEIPEnable' -Value 0 -PropertyType DWord -Force
 New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting' -Force -ErrorAction SilentlyContinue | Out-Null
 New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting' -Name 'Disabled' -Value 1 -PropertyType DWord -Force
+
+# Microsoft Edge: skip the first-run questions (welcome/sign-in/personalisation),
+# the browser-data import step, and in-product recommendation prompts.
+New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name 'HideFirstRunExperience' -Value 1 -PropertyType DWord -Force
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name 'AutoImportAtFirstRun' -Value 4 -PropertyType DWord -Force
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name 'ShowRecommendationsEnabled' -Value 0 -PropertyType DWord -Force
 
 $runOnceValue = "powershell.exe -NoExit -ExecutionPolicy Bypass -File C:\Scripts\$SetupScriptFileName -OsImagePackageUrl '$OsImagePackageUrl' -ConfiguratorAppUrl '$ConfiguratorAppUrl' -VMPrefix '$NestedVmPrefix' -VMCount $NestedVmCount"
 Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'RunSetupScript' -Value $runOnceValue
