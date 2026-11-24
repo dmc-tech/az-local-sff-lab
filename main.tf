@@ -175,7 +175,47 @@ resource "azurerm_windows_virtual_machine" "vm" {
     version   = "latest"
   }
 
+  # Required by the AADLoginForWindows extension (Microsoft Entra ID sign-in)
+  identity {
+    type = "SystemAssigned"
+  }
+
   tags = var.tags
+}
+
+# ---------------------------------------------------------------------------
+# Microsoft Entra ID sign-in for the host VM
+# AADLoginForWindows joins the VM to Entra ID; the role assignment below
+# decides who may sign in (Administrator Login = local admin on the host,
+# which the Hyper-V and K3s scripts need).
+# ---------------------------------------------------------------------------
+data "azurerm_client_config" "current" {}
+
+locals {
+  # Default to whoever runs Terraform when no principals are listed.
+  vm_login_principal_ids = length(var.vm_login_principal_ids) > 0 ? var.vm_login_principal_ids : [data.azurerm_client_config.current.object_id]
+}
+
+resource "azurerm_role_assignment" "vm_login" {
+  for_each             = toset(local.vm_login_principal_ids)
+  scope                = azurerm_resource_group.rg.id
+  role_definition_name = var.vm_login_role
+  principal_id         = each.value
+}
+
+resource "azurerm_virtual_machine_extension" "aad_login" {
+  name                       = "AADLoginForWindows"
+  virtual_machine_id         = azurerm_windows_virtual_machine.vm.id
+  publisher                  = "Microsoft.Azure.ActiveDirectory"
+  type                       = "AADLoginForWindows"
+  type_handler_version       = "2.0"
+  auto_upgrade_minor_version = true
+
+  tags = var.tags
+
+  # The provisioning extension reboots the VM; install afterwards so the two
+  # extension operations never overlap.
+  depends_on = [azurerm_virtual_machine_extension.provision]
 }
 
 # ---------------------------------------------------------------------------

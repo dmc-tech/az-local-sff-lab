@@ -18,6 +18,7 @@ Azure Local SFF nodes require a [zero-touch provisioning (ZTP)](https://learn.mi
 - 1 TB premium data disk for VM storage
 - Virtual network with NAT gateway for outbound internet
 - Azure Bastion for secure RDP access (no public IP on the VM)
+- Microsoft Entra ID sign-in for the host VM (Terraform): system-assigned managed identity, the `AADLoginForWindows` extension, and the **Virtual Machine Administrator Login** role on the resource group
 - Auto-shutdown schedule (19:00 GMT daily)
 - A storage account to deliver provisioning scripts to the host
 
@@ -112,6 +113,8 @@ terraform apply
 
 4. **Connect via Azure Bastion.** In the Azure Portal: VM > Connect > Bastion. Sign in with the admin credentials from `terraform.tfvars`.
 
+   **Microsoft Entra ID sign-in.** Terraform also joins the host to Entra ID with the `AADLoginForWindows` extension. It grants `vm_login_role` (default **Virtual Machine Administrator Login**, which the lab scripts need) on the resource group to the object IDs in `vm_login_principal_ids`. If the list is empty, the role goes to the identity running Terraform. Set `vm_login_principal_ids` explicitly when Terraform runs as a service principal, because a service principal can't sign in to the VM. The deployment needs permission to create role assignments (Owner or User Access Administrator on the resource group or subscription). Entra ID sign-in through Bastion uses the native client (`az network bastion rdp ... --enable-mfa`), which requires the Bastion Standard SKU or higher. The template deploys the default SKU, so the local admin account remains the portal sign-in.
+
 ### Bicep
 
 Deploy from the repository root after creating a resource group. Copy [`main.bicepparam.example`](main.bicepparam.example) to a parameter file you do not commit, set `adminPassword` and other parameters (`osImagePackageUrl` / `configuratorAppUrl` if you want to override the defaults in [`main.bicep`](main.bicep)), then run `az deployment group create` as documented in [`DEPLOYMENT.md`](DEPLOYMENT.md) (including optional password-from-shell examples). Outputs such as `vmPrivateIp` and `scriptsStorageAccountName` are available from the deployment. Connect via Bastion using the admin credentials you supplied to the deployment.
@@ -192,7 +195,8 @@ The following table matches the **Terraform** variable names; Bicep uses the par
 | Bastion subnet | `10.0.2.0/26` (`AzureBastionSubnet`) |
 | NAT gateway | Standard SKU for outbound internet |
 | Azure Bastion | Secure RDP access to the host |
-| Windows Server VM | `Standard_E32s_v5`, Windows Server 2025 Datacenter |
+| Windows Server VM | `Standard_E32s_v5`, Windows Server 2025 Datacenter, system-assigned identity, `AADLoginForWindows` extension |
+| Role assignment | `vm_login_role` (default Virtual Machine Administrator Login) on the resource group for `vm_login_principal_ids` (Terraform) |
 | Data disk | 1 TB Premium LRS, attached as LUN 0 |
 | Storage account | Holds provisioning scripts (`setup.ps1`, `Get-SffNodeVoucher.ps1`, `vm-bootstrap.ps1`, `Deploy-K3sCluster.ps1`, `k3s-node-prep.sh`, `k3s-install-server.sh`, `setup_k3s_arc.sh`, `k3s-join-agent.sh`, `bootstrap-k3s-agents.sh`, `K3S-CLUSTER-SETUP.txt`) |
 
