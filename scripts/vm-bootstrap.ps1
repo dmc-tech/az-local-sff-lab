@@ -101,6 +101,13 @@ New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\SQMClient\Windows' -Na
 New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting' -Force -ErrorAction SilentlyContinue | Out-Null
 New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting' -Name 'Disabled' -Value 1 -PropertyType DWord -Force
 
+# Microsoft Edge: skip the first-run questions (welcome/sign-in/personalisation),
+# the browser-data import step, and in-product recommendation prompts.
+New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name 'HideFirstRunExperience' -Value 1 -PropertyType DWord -Force
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name 'AutoImportAtFirstRun' -Value 4 -PropertyType DWord -Force
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name 'ShowRecommendationsEnabled' -Value 0 -PropertyType DWord -Force
+
 $runOnceValue = "powershell.exe -NoExit -ExecutionPolicy Bypass -File C:\Scripts\$SetupScriptFileName -OsImagePackageUrl '$OsImagePackageUrl' -ConfiguratorAppUrl '$ConfiguratorAppUrl' -VMPrefix '$NestedVmPrefix' -VMCount $NestedVmCount"
 Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'RunSetupScript' -Value $runOnceValue
 
