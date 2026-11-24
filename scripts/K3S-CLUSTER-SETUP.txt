@@ -123,7 +123,7 @@ Useful options:
   -SshKeyPattern 'lab-sff-node-{0}-keyPair.pem'   Exact key name per node number.
   -SshKeyPath <file>      One key for every node.
   -AuthMode Password      Log in with -SshUser / -SshPassword instead of keys
-                          (default Auto: keys if any .pem is in the folder).
+                          (default Auto: keys; stops if no .pem is found).
   -SshUser / -SshPassword Override the user (edgeuser) / sudo password (Password1).
   -NodeIPs a,b,c          Skip discovery; first IP becomes the first server.
 

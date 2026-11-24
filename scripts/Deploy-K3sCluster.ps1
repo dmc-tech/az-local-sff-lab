@@ -39,7 +39,8 @@
     Without it the script asks interactively.
 
 .PARAMETER AuthMode
-    Auto (default): Key when any *.pem is in -SshKeyDirectory, otherwise Password.
+    Auto (default): Key, using the *.pem files in -SshKeyDirectory; stops with
+    guidance if there are none (deployed SFF Linux does not accept the password).
     Key: OpenSSH ssh.exe with the per-node keys the Azure portal provides when
     the SFF nodes are provisioned (see -SshKeyDirectory). Password: -SshUser /
     -SshPassword via PuTTY plink (installed by setup.ps1).
@@ -155,7 +156,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.2.0"
+$ScriptVersion = "1.2.1"
 $RemoteDir = "/tmp/k3s-lab"
 # Text piped to ssh.exe is base64 (see Send-RemoteText), so ASCII is all that is needed.
 $OutputEncoding = [System.Text.Encoding]::ASCII
@@ -531,6 +532,9 @@ function Test-NodeReady {
     }
     if ($r.ExitCode -ne 0) {
         $detail = ($r.Lines | Where-Object { $_ } | Select-Object -Last 1)
+        if ($detail -match "password was not accepted|Access denied") {
+            return "password rejected for $SshUser ($detail). Deployed SFF Linux nodes use the per-node portal keys: copy the .pem files to $SshKeyDirectory and use -AuthMode Key (or Auto)."
+        }
         return "SSH as $SshUser not possible yet ($detail)"
     }
     if ($r.Output -match "SUDO_PW") {
@@ -775,8 +779,20 @@ try {
 
     if ($AuthMode -eq "Auto") {
         $keyCount = @(Get-KeyFiles | Where-Object { $_.Extension -eq ".pem" -or $SshKeyPath }).Count
-        if ($keyCount -gt 0) { $AuthMode = "Key" } else { $AuthMode = "Password" }
-        Write-Status "AuthMode Auto -> $AuthMode ($keyCount key file(s) in $SshKeyDirectory)"
+        if ($keyCount -eq 0) {
+            # Deployed SFF Linux nodes take the per-node portal keys, not the
+            # bootstrap loader's password, so do not fall back silently.
+            $found = @()
+            if (Test-Path $SshKeyDirectory) { $found = @(Get-ChildItem -Path $SshKeyDirectory -File | ForEach-Object { $_.Name }) }
+            $foundText = "none"
+            if ($found.Count -gt 0) { $foundText = $found -join ", " }
+            throw ("No .pem keys in $SshKeyDirectory (files there: $foundText). The deployed SFF Linux nodes " +
+                   "need the per-node private keys the Azure portal provides (e.g. lab-sff-node-1-keyPair.pem). " +
+                   "Copy them to $SshKeyDirectory, or pass -SshKeyDirectory / -SshKeyPath. " +
+                   "Use -AuthMode Password only if the nodes accept '$SshUser' with a password.")
+        }
+        $AuthMode = "Key"
+        Write-Status "AuthMode Auto -> Key ($keyCount key file(s) in $SshKeyDirectory)"
     }
 
     if ($AuthMode -eq "Password") {
